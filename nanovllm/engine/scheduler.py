@@ -37,6 +37,7 @@ class Scheduler:
             self.waiting.popleft()
             self.running.append(seq)
             scheduled_seqs.append(seq)
+
         if scheduled_seqs:
             return scheduled_seqs, True
 
@@ -53,9 +54,11 @@ class Scheduler:
                 num_seqs += 1
                 self.block_manager.may_append(seq)
                 scheduled_seqs.append(seq)
-        assert scheduled_seqs
-        self.running.extendleft(reversed(scheduled_seqs))
-        return scheduled_seqs, False
+        if scheduled_seqs:
+            self.running.extendleft(reversed(scheduled_seqs))
+            return scheduled_seqs, False
+
+        return [], True
 
     def preempt(self, seq: Sequence):
         seq.status = SequenceStatus.WAITING
