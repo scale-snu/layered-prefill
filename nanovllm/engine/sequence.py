@@ -15,8 +15,10 @@ class Sequence:
     block_size = 256
     counter = count()
 
-    def __init__(self, token_ids: list[int], sampling_params = SamplingParams()):
-        self.seq_id = next(Sequence.counter)
+    def __init__(self, token_ids: list[int], sampling_params = SamplingParams(), seq_id: str = None):
+        if seq_id is None:
+            seq_id = next(Sequence.counter)
+        self.seq_id = seq_id
         self.status = SequenceStatus.WAITING
         self.token_ids = copy(token_ids)
         self.last_token = token_ids[-1]
@@ -27,6 +29,7 @@ class Sequence:
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
+        self.num_generated_from_last = self.num_tokens
 
     def __len__(self):
         return self.num_tokens
@@ -41,6 +44,12 @@ class Sequence:
     @property
     def num_completion_tokens(self):
         return self.num_tokens - self.num_prompt_tokens
+
+    @property
+    def generated_from_last(self):
+        outputs = self.token_ids[self.num_generated_from_last:]
+        self.num_generated_from_last = len(self.token_ids)
+        return outputs
 
     @property
     def prompt_token_ids(self):
@@ -81,3 +90,12 @@ class Sequence:
             self.token_ids = state[-1]
         else:
             self.last_token = state[-1]
+
+    def __repr__(self):
+        return (f"Sequence(seq_id={self.seq_id}, status={self.status}, num_tokens={self.num_tokens}, "
+                f"num_prompt_tokens={self.num_prompt_tokens}, num_cached_tokens={self.num_cached_tokens}, "
+                f"num_completion_tokens={self.num_completion_tokens}, last_token={self.last_token})")
+
+    def __str__(self):
+        return (f"Sequence(seq_id={self.seq_id}, status={self.status}, "
+                f"tokens={self.token_ids[:10]}...{self.token_ids[-10:] if len(self.token_ids) > 20 else self.token_ids})")
