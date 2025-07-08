@@ -92,8 +92,17 @@ class ModelRunner:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         max_num_batched_tokens, max_model_len = self.config.max_num_batched_tokens, self.config.max_model_len
-        num_seqs = min(max_num_batched_tokens // max_model_len, self.config.max_num_seqs)
-        seqs = [Sequence([0] * max_model_len) for _ in range(num_seqs)]
+        # num_seqs = min((max_num_batched_tokens + max_model_len - 1) // max_model_len, self.config.max_num_seqs)
+        # seq_len = min(max_num_batched_tokens // num_seqs, max_model_len)
+        seq_lens = []
+        for _ in range(self.config.max_num_seqs):
+            seq_len = min(max_num_batched_tokens, max_model_len)
+            seq_lens.append(seq_len)
+            max_num_batched_tokens -= seq_len
+            if max_num_batched_tokens <= 0:
+                break
+
+        seqs = [Sequence([0] * seq_len) for seq_len in seq_lens]
         self.run(seqs, True)
         torch.cuda.empty_cache()
 
@@ -117,7 +126,7 @@ class ModelRunner:
                 layer_id += 1
 
     def prepare_block_tables(self, seqs: list[Sequence]):
-        max_len = max(len(seq.block_table) for seq in seqs)
+        max_len = max(len(seq.block_table) for seq in seqs) if seqs else 0
         block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
         block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         return block_tables
@@ -148,9 +157,10 @@ class ModelRunner:
                 if i != seq.num_blocks - 1:
                     end = start + self.block_size
                 else:
-                    end = start + seq.last_block_num_tokens 
+                    end = start + seq.last_block_num_tokens
                 slot_mapping.extend(list(range(start, end)))
         if cu_seqlens_k[-1] > cu_seqlens_q[-1]:    # prefix cache
+            raise ValueError("The prefix cache is not supported in the current implementation.")
             block_tables = self.prepare_block_tables(seqs)
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
@@ -205,6 +215,7 @@ class ModelRunner:
             graph.replay()
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
+
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
@@ -225,7 +236,7 @@ class ModelRunner:
         context_lens = torch.zeros(max_bs, dtype=torch.int32)
         block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
         outputs = torch.zeros(max_bs, hf_config.hidden_size)
-        self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
+        self.graph_bs = list(range(1, 32)) + list(range(32, max_bs + 1, 8))
         self.graphs = {}
         self.graph_pool = None
 
