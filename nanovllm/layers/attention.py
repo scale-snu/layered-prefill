@@ -61,19 +61,32 @@ class Attention(nn.Module):
         k = k.view(-1, self.num_kv_heads, self.head_dim)
         v = v.view(-1, self.num_kv_heads, self.head_dim)
         context = get_context()
+
         k_cache, v_cache = self.k_cache, self.v_cache
         if k_cache.numel() and v_cache.numel():
             store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
+
+        len_prefill = context.cu_seqlens_q[-1] if context.is_prefill else 0
+
+        os = []
         if context.is_prefill:
-            if context.block_tables is not None:    # prefix cache
+            if context.prefill_block_tables is not None:    # chunked prefill
                 k, v = k_cache, v_cache
-            o = flash_attn_varlen_func(q, k, v,
+            else:
+                k = k[:len_prefill]
+                v = v[:len_prefill]
+
+            o = flash_attn_varlen_func(q[:len_prefill], k, v,
                                        max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
                                        max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
-                                       softmax_scale=self.scale, causal=True, block_table=context.block_tables)
-        else:    # decode
-            o = flash_attn_with_kvcache(q.unsqueeze(1), k_cache, v_cache,
-                                        cache_seqlens=context.context_lens, block_table=context.block_tables,
+                                       softmax_scale=self.scale, causal=True, block_table=context.prefill_block_tables)
+            o = o.view(-1, self.num_heads * self.head_dim)
+            os.append(o)
+        if context.decode_block_tables is not None:  # decoding
+            o = flash_attn_with_kvcache(q[len_prefill:].unsqueeze(1), k_cache, v_cache,
+                                        cache_seqlens=context.context_lens, block_table=context.decode_block_tables,
                                         softmax_scale=self.scale, causal=True)
-        o = o.view(-1, self.num_heads * self.head_dim)
+            o = o.view(-1, self.num_heads * self.head_dim)
+            os.append(o)
+        o = torch.cat(os, dim=0)
         return o

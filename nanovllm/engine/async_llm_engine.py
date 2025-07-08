@@ -133,12 +133,12 @@ class _AsyncLLMEngine:
         self.scheduler.add(Sequence(prompt, sampling_params, seq_id))
 
     def step(self) -> List[Tuple[str, List[int], str, bool]]:
-        seqs, is_prefill = self.scheduler.schedule()
+        seqs = self.scheduler.schedule()
         if not seqs:
             return []
-        token_ids = self.model_runner.call("run", seqs, is_prefill)
+        token_ids = self.model_runner.call("run", seqs)
         self.scheduler.postprocess(seqs, token_ids)
-        generated_from_lasts = [seq.generated_from_last for seq in seqs]
+        generated_from_lasts = [seq.generated_from_last for seq, is_prefill in seqs]
         outputs = [
             (
                 seq.seq_id,
@@ -146,7 +146,7 @@ class _AsyncLLMEngine:
                 generated_from_last,
                 seq.is_finished,
             )
-            for seq, generated_from_last in zip(seqs, generated_from_lasts)
+            for (seq, is_prefill), generated_from_last in zip(seqs, generated_from_lasts)
         ]
         return outputs
 
