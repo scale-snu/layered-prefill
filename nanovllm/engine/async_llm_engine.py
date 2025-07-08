@@ -132,13 +132,22 @@ class _AsyncLLMEngine:
             prompt = self.tokenizer.encode(prompt)
         self.scheduler.add(Sequence(prompt, sampling_params, seq_id))
 
-    def step(self) -> List[Tuple[str, List[int], bool]]:
+    def step(self) -> List[Tuple[str, List[int], str, bool]]:
         seqs, is_prefill = self.scheduler.schedule()
         if not seqs:
             return []
         token_ids = self.model_runner.call("run", seqs, is_prefill)
         self.scheduler.postprocess(seqs, token_ids)
-        outputs =  [(seq.seq_id, self.tokenizer.decode(seq.generated_from_last), seq.is_finished) for seq in seqs]
+        generated_from_lasts = [seq.generated_from_last for seq in seqs]
+        outputs = [
+            (
+                seq.seq_id,
+                self.tokenizer.decode(generated_from_last, skip_special_tokens=True),
+                generated_from_last,
+                seq.is_finished,
+            )
+            for seq, generated_from_last in zip(seqs, generated_from_lasts)
+        ]
         return outputs
 
     def exit(self) -> None:
@@ -179,10 +188,10 @@ class AsyncLLMEngine:
             # no direct abort support in scheduler
             pass
         outputs = await asyncio.get_event_loop().run_in_executor(None, self._engine.step)
-        for rid, tokens, is_finished in outputs:
+        for rid, generated_text, tokens, is_finished in outputs:
             # if rid in self._tracker._streams:
             assert rid in self._tracker._streams, f"Stream {rid} not found in tracker."
-            self._tracker._streams[rid].put((rid, tokens))
+            self._tracker._streams[rid].put((rid, generated_text, tokens))
             if is_finished:
                 self._tracker.abort_request(rid)
         return bool(outputs)

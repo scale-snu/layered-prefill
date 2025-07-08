@@ -92,8 +92,17 @@ class ModelRunner:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         max_num_batched_tokens, max_model_len = self.config.max_num_batched_tokens, self.config.max_model_len
-        num_seqs = min(max_num_batched_tokens // max_model_len, self.config.max_num_seqs)
-        seqs = [Sequence([0] * max_model_len) for _ in range(num_seqs)]
+        # num_seqs = min((max_num_batched_tokens + max_model_len - 1) // max_model_len, self.config.max_num_seqs)
+        # seq_len = min(max_num_batched_tokens // num_seqs, max_model_len)
+        seq_lens = []
+        for _ in range(self.config.max_num_seqs):
+            seq_len = min(max_num_batched_tokens, max_model_len)
+            seq_lens.append(seq_len)
+            max_num_batched_tokens -= seq_len
+            if max_num_batched_tokens <= 0:
+                break
+
+        seqs = [Sequence([0] * seq_len) for seq_len in seq_lens]
         self.run(seqs, True)
         torch.cuda.empty_cache()
 
@@ -227,7 +236,7 @@ class ModelRunner:
         context_lens = torch.zeros(max_bs, dtype=torch.int32)
         block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
         outputs = torch.zeros(max_bs, hf_config.hidden_size)
-        self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
+        self.graph_bs = list(range(1, 32)) + list(range(32, max_bs + 1, 8))
         self.graphs = {}
         self.graph_pool = None
 

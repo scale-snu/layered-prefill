@@ -61,6 +61,7 @@ class Scheduler:
         return [], True
 
     def preempt(self, seq: Sequence):
+        print(f"Preempting sequence {seq.seq_id} with status {seq.status}")
         seq.status = SequenceStatus.WAITING
         self.block_manager.deallocate(seq)
         self.waiting.appendleft(seq)
