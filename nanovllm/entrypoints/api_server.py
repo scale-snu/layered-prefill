@@ -84,7 +84,8 @@ if __name__ == "__main__":
     config = APIServerConfig(
         # model="/data3/cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B/snapshots/ae659febe817e4b3ebd7355f47792725801204c9/",
         model="/data3/cache/huggingface/hub/models--Qwen--Qwen3-32B/snapshots/d47b0d4ae4b48fde975756bf360a63a9cca8d470/",
-        max_num_batched_tokens=4096,
+        # model="/data3/cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/e6de91484c29aa9480d55605af694f39b081c455/",
+        max_num_batched_tokens=512,
         max_num_seqs=64,
         max_model_len=8192,
         gpu_memory_utilization=0.9,
@@ -92,7 +93,7 @@ if __name__ == "__main__":
         enforce_eager=False,
         log_level="debug",
         host="localhost",
-        port=8000,
+        port=8001,
     )
 
     # Create the system config from the config.

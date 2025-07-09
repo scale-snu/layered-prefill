@@ -5,7 +5,7 @@ from multiprocessing.synchronize import Event
 from multiprocessing.shared_memory import SharedMemory
 
 from nanovllm.config import Config
-from nanovllm.engine.sequence import Sequence
+from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
@@ -23,7 +23,7 @@ class ModelRunner:
         self.rank = rank
         self.event = event
 
-        dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
+        dist.init_process_group("nccl", "tcp://localhost:2334", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)
@@ -100,7 +100,10 @@ class ModelRunner:
             if max_num_batched_tokens <= 0:
                 break
 
-        seqs = [(Sequence([0] * seq_len), True) for seq_len in seq_lens]
+        seqs = [Sequence([0] * seq_len) for seq_len in seq_lens]
+        for seq in seqs:
+            seq.status = SequenceStatus.PREFILLING
+            seq.num_tokens_to_process = seq.num_prompt_tokens
         self.run(seqs)
         torch.cuda.empty_cache()
 
@@ -143,13 +146,13 @@ class ModelRunner:
 
         prefill_seqs = []
         decode_seqs = []
-        for seq, is_prefill in seqs:
-            if is_prefill:
+        for seq in seqs:
+            if seq.status == SequenceStatus.PREFILLING:
                 prefill_seqs.append(seq)
-                seqlen = len(seq)
-                input_ids.extend(seq[seq.num_processed_tokens:])
+                seqlen = seq.num_processed_tokens + seq.num_tokens_to_process
+                input_ids.extend(seq[seq.num_processed_tokens:seqlen])
                 positions.extend(list(range(seq.num_processed_tokens, seqlen)))
-                seqlen_q = seqlen - seq.num_processed_tokens
+                seqlen_q = seq.num_tokens_to_process
                 seqlen_k = seqlen
                 cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
                 cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
@@ -157,19 +160,24 @@ class ModelRunner:
                 max_seqlen_k = max(seqlen_k, max_seqlen_k)
                 if not seq.block_table:
                     continue
-                for i in range(seq.num_processed_blocks, seq.num_blocks):
+                seq_slot_mapping = []
+                for i in range(seq.num_blocks):
                     start = seq.block_table[i] * self.block_size
                     if i != seq.num_blocks - 1:
                         end = start + self.block_size
                     else:
                         end = start + seq.last_block_num_tokens
-                    slot_mapping.extend(list(range(start, end)))
-            else:
+                    seq_slot_mapping.extend(list(range(start, end)))
+                print(len(seq_slot_mapping), seq.num_processed_tokens, seq.num_tokens_to_process, seq.num_blocks, seq.last_block_num_tokens)
+                slot_mapping.extend(seq_slot_mapping[seq.num_processed_tokens:seq.num_processed_tokens + seq.num_tokens_to_process])
+            elif seq.status == SequenceStatus.DECODING:
                 decode_seqs.append(seq)
                 input_ids.append(seq.last_token)
                 positions.append(len(seq))
                 context_lens.append(len(seq))
                 slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens - 1)
+            else:
+                raise ValueError(f"Invalid sequence status: {seq.status}")
 
         is_prefill = len(prefill_seqs) > 0
         prefill_block_tables = None
@@ -198,9 +206,9 @@ class ModelRunner:
         )
         return input_ids, positions
 
-    def prepare_sample(self, seqs: list[tuple[Sequence, bool]]):
+    def prepare_sample(self, seqs: list[Sequence]):
         temperatures = []
-        for seq, is_prefill in seqs:
+        for seq in seqs:
             temperatures.append(seq.temperature)
         temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
         return temperatures
@@ -231,10 +239,15 @@ class ModelRunner:
             graph.replay()
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
-    def run(self, seqs: list[tuple[Sequence, bool]]) -> list[int]:
+    def run(self, seqs: list[Sequence]) -> list[int]:
         input_ids, positions = self.prepare(seqs)
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
         logits = self.run_model(input_ids, positions)
+
+        if logits[0].argmax() == 34378 or logits[0].argmax() == 6902:
+            import pdb; pdb.set_trace()
+
+        print(logits[0].max(), logits[0].argmax())
         token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
         reset_context()
         return token_ids
@@ -251,7 +264,7 @@ class ModelRunner:
         context_lens = torch.zeros(max_bs, dtype=torch.int32)
         block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
         outputs = torch.zeros(max_bs, hf_config.hidden_size)
-        self.graph_bs = list(range(1, 32)) + list(range(32, max_bs + 1, 8))
+        self.graph_bs = list(range(1, 8)) + list(range(8, max_bs + 1, 8))
         self.graphs = {}
         self.graph_pool = None
 

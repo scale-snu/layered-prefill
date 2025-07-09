@@ -62,11 +62,22 @@ class Attention(nn.Module):
         v = v.view(-1, self.num_kv_heads, self.head_dim)
         context = get_context()
 
-        k_cache, v_cache = self.k_cache, self.v_cache
-        if k_cache.numel() and v_cache.numel():
-            store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
+        # print(
+        #     f"Attention forward: q={q.shape}, k={k.shape}, v={v.shape}, "
+        #     f"slot_mapping={context.slot_mapping.shape if context.slot_mapping is not None else None}, "
+        # )
 
         len_prefill = context.cu_seqlens_q[-1] if context.is_prefill else 0
+
+        k_cache, v_cache = self.k_cache, self.v_cache
+        if k_cache.numel() and v_cache.numel():
+            store_kvcache(
+                k,
+                v,
+                k_cache,
+                v_cache,
+                context.slot_mapping,
+            )
 
         os = []
         if context.is_prefill:

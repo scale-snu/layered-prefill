@@ -7,7 +7,8 @@ from nanovllm.sampling_params import SamplingParams
 
 class SequenceStatus(Enum):
     WAITING = auto()
-    RUNNING = auto()
+    PREFILLING = auto()
+    DECODING = auto()
     FINISHED = auto()
 
 
@@ -25,6 +26,7 @@ class Sequence:
         self.num_tokens = len(self.token_ids)
         self.num_prompt_tokens = len(token_ids)
         self.num_processed_tokens = 0
+        self.num_tokens_to_process = 0
         self.block_table = []
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
@@ -94,8 +96,8 @@ class Sequence:
     def __repr__(self):
         return (f"Sequence(seq_id={self.seq_id}, status={self.status}, num_tokens={self.num_tokens}, "
                 f"num_prompt_tokens={self.num_prompt_tokens}, num_processed_tokens={self.num_processed_tokens}, "
+                f"num_tokens_to_process={self.num_tokens_to_process}, block_table={self.block_table}, "
                 f"num_completion_tokens={self.num_completion_tokens}, last_token={self.last_token})")
 
     def __str__(self):
-        return (f"Sequence(seq_id={self.seq_id}, status={self.status}, "
-                f"tokens={self.token_ids[:10]}...{self.token_ids[-10:] if len(self.token_ids) > 20 else self.token_ids})")
+        return self.__repr__()

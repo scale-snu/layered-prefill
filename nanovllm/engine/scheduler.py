@@ -13,11 +13,16 @@ class Scheduler:
         self.eos = config.eos
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
         self.waiting: deque[Sequence] = deque()
-        self.running: deque[Sequence] = deque()
+        self.prefilling: deque[Sequence] = deque()
+        self.decoding: deque[Sequence] = deque()
         self.enable_chunked_prefill = config.enable_chunked_prefill
 
     def is_finished(self):
-        return not self.waiting and not self.running
+        return (
+            not self.waiting
+            and not self.prefilling
+            and not self.decoding
+        )
 
     def add(self, seq: Sequence):
         self.waiting.append(seq)
@@ -28,22 +33,56 @@ class Scheduler:
         decode_scheduled_seqs = []
         num_seqs = 0
         num_batched_tokens = 0
-        while self.waiting and num_seqs < self.max_num_seqs:
+
+        while (
+            self.prefilling
+            and num_seqs < self.max_num_seqs
+            and num_batched_tokens < self.max_num_batched_tokens
+        ):
+            seq = self.prefilling[0]
+            num_seqs += 1
+            num_tokens_to_process = min(
+                len(seq) - seq.num_processed_tokens,
+                self.max_num_batched_tokens - num_batched_tokens,
+            )
+            num_batched_tokens += num_tokens_to_process
+            seq.num_tokens_to_process = num_tokens_to_process
+
+            self.prefilling.popleft()
+            prefill_scheduled_seqs.append(seq)
+
+        while (
+            self.waiting
+            and num_seqs < self.max_num_seqs
+            and num_batched_tokens < self.max_num_batched_tokens
+        ):
             seq = self.waiting[0]
-            if num_batched_tokens + len(seq) > self.max_num_batched_tokens or not self.block_manager.can_allocate(seq):
+            if not self.block_manager.can_allocate(seq):
                 break
             num_seqs += 1
             self.block_manager.allocate(seq)
-            num_batched_tokens += len(seq) - seq.num_processed_tokens
+
+            num_tokens_to_process = min(
+                len(seq) - seq.num_processed_tokens,
+                self.max_num_batched_tokens - num_batched_tokens,
+            )
+            num_batched_tokens += num_tokens_to_process
+            seq.num_tokens_to_process = num_tokens_to_process
+
             self.waiting.popleft()
             prefill_scheduled_seqs.append(seq)
 
+            print(f"Scheduled sequence {seq} for pre-filling")
+
         # decode
-        while self.running and num_seqs < self.max_num_seqs:
-            seq = self.running.popleft()
+        while (
+            self.decoding
+            and num_seqs < self.max_num_seqs
+        ):
+            seq = self.decoding.popleft()
             while not self.block_manager.can_append(seq):
-                if self.running:
-                    self.preempt(self.running.pop())
+                if self.decoding:
+                    self.preempt(self.decoding.pop())
                 else:
                     self.preempt(seq)
                     break
@@ -54,13 +93,18 @@ class Scheduler:
 
         if prefill_scheduled_seqs:
             for seq in prefill_scheduled_seqs:
-                seq.status = SequenceStatus.RUNNING
-                self.running.append(seq)
+                seq.status = SequenceStatus.PREFILLING
+                self.prefilling.append(seq)
 
         if decode_scheduled_seqs:
-            self.running.extendleft(reversed(decode_scheduled_seqs))
+            self.decoding.extendleft(reversed(decode_scheduled_seqs))
 
-        scheduled_seqs = [(seq, True) for seq in prefill_scheduled_seqs] + [(seq, False) for seq in decode_scheduled_seqs]
+        scheduled_seqs = prefill_scheduled_seqs + decode_scheduled_seqs
+
+        print(f"Scheduled {len(scheduled_seqs)} sequences: "
+              f"{len(self.waiting)} waiting, "
+              f"{len(self.prefilling)} pre-filling, "
+              f"{len(self.decoding)} decoding")
 
         return scheduled_seqs
 
@@ -70,10 +114,23 @@ class Scheduler:
         self.block_manager.deallocate(seq)
         self.waiting.appendleft(seq)
 
-    def postprocess(self, seqs: list[tuple[Sequence, bool]], token_ids: list[int]) -> list[bool]:
-        for (seq, is_prefill), token_id in zip(seqs, token_ids):
-            seq.append_token(token_id)
-            if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
-                seq.status = SequenceStatus.FINISHED
-                self.block_manager.deallocate(seq)
-                self.running.remove(seq)
+    def postprocess(
+            self,
+            seqs: list[Sequence],
+            token_ids: list[int],
+            ) -> list[bool]:
+        for seq, token_id in zip(seqs, token_ids):
+            if seq.status == SequenceStatus.PREFILLING:
+                seq.num_processed_tokens += seq.num_tokens_to_process
+
+                if seq.num_processed_tokens >= seq.num_prompt_tokens:
+                    seq.status = SequenceStatus.DECODING
+                    self.prefilling.remove(seq)
+                    self.decoding.append(seq)
+
+            if seq.status == SequenceStatus.DECODING:
+                seq.append_token(token_id)
+                if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
+                    seq.status = SequenceStatus.FINISHED
+                    self.block_manager.deallocate(seq)
+                    self.decoding.remove(seq)
