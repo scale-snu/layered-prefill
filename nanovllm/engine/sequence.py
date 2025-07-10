@@ -7,7 +7,8 @@ from nanovllm.sampling_params import SamplingParams
 
 class SequenceStatus(Enum):
     WAITING = auto()
-    RUNNING = auto()
+    PREFILLING = auto()
+    DECODING = auto()
     FINISHED = auto()
 
 
@@ -24,7 +25,8 @@ class Sequence:
         self.last_token = token_ids[-1]
         self.num_tokens = len(self.token_ids)
         self.num_prompt_tokens = len(token_ids)
-        self.num_cached_tokens = 0
+        self.num_processed_tokens = 0
+        self.num_tokens_to_process = 0
         self.block_table = []
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
@@ -60,8 +62,8 @@ class Sequence:
         return self.token_ids[self.num_prompt_tokens:]
 
     @property
-    def num_cached_blocks(self):
-        return self.num_cached_tokens // self.block_size
+    def num_processed_blocks(self):
+        return self.num_processed_tokens // self.block_size
 
     @property
     def num_blocks(self):
@@ -81,11 +83,11 @@ class Sequence:
         self.num_tokens += 1
 
     def __getstate__(self):
-        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table,
+        return (self.num_tokens, self.num_prompt_tokens, self.num_processed_tokens, self.block_table,
                 self.token_ids if self.num_completion_tokens == 0 else self.last_token)
 
     def __setstate__(self, state):
-        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.block_table = state[:-1]
+        self.num_tokens, self.num_prompt_tokens, self.num_processed_tokens, self.block_table = state[:-1]
         if self.num_completion_tokens == 0:
             self.token_ids = state[-1]
         else:
@@ -93,9 +95,9 @@ class Sequence:
 
     def __repr__(self):
         return (f"Sequence(seq_id={self.seq_id}, status={self.status}, num_tokens={self.num_tokens}, "
-                f"num_prompt_tokens={self.num_prompt_tokens}, num_cached_tokens={self.num_cached_tokens}, "
+                f"num_prompt_tokens={self.num_prompt_tokens}, num_processed_tokens={self.num_processed_tokens}, "
+                f"num_tokens_to_process={self.num_tokens_to_process}, block_table={self.block_table}, "
                 f"num_completion_tokens={self.num_completion_tokens}, last_token={self.last_token})")
 
     def __str__(self):
-        return (f"Sequence(seq_id={self.seq_id}, status={self.status}, "
-                f"tokens={self.token_ids[:10]}...{self.token_ids[-10:] if len(self.token_ids) > 20 else self.token_ids})")
+        return self.__repr__()

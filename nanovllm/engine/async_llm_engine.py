@@ -20,7 +20,7 @@ from nanovllm.engine.scheduler import Scheduler
 from nanovllm.engine.model_runner import ModelRunner
 from nanovllm.config import Config
 
-ENGINE_ITERATION_TIMEOUT_S = 60
+ENGINE_ITERATION_TIMEOUT_S = 600
 
 
 class AsyncStream:
@@ -133,10 +133,10 @@ class _AsyncLLMEngine:
         self.scheduler.add(Sequence(prompt, sampling_params, seq_id))
 
     def step(self) -> List[Tuple[str, List[int], str, bool]]:
-        seqs, is_prefill = self.scheduler.schedule()
+        seqs = self.scheduler.schedule()
         if not seqs:
             return []
-        token_ids = self.model_runner.call("run", seqs, is_prefill)
+        token_ids = self.model_runner.call("run", seqs)
         self.scheduler.postprocess(seqs, token_ids)
         generated_from_lasts = [seq.generated_from_last for seq in seqs]
         outputs = [
@@ -147,6 +147,7 @@ class _AsyncLLMEngine:
                 seq.is_finished,
             )
             for seq, generated_from_last in zip(seqs, generated_from_lasts)
+            if generated_from_last
         ]
         return outputs
 
