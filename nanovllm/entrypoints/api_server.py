@@ -93,7 +93,8 @@ if __name__ == "__main__":
         enforce_eager=False,
         log_level="debug",
         host="localhost",
-        port=8001,
+        port=8000,
+        schedule_mode="chunked-prefill",  # or "orca" or "staged-prefill"
     )
 
     # Create the system config from the config.

@@ -23,7 +23,7 @@ class ModelRunner:
         self.rank = rank
         self.event = event
 
-        dist.init_process_group("nccl", "tcp://localhost:2334", world_size=self.world_size, rank=rank)
+        dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)
@@ -168,7 +168,7 @@ class ModelRunner:
                     else:
                         end = start + seq.last_block_num_tokens
                     seq_slot_mapping.extend(list(range(start, end)))
-                print(len(seq_slot_mapping), seq.num_processed_tokens, seq.num_tokens_to_process, seq.num_blocks, seq.last_block_num_tokens)
+
                 slot_mapping.extend(seq_slot_mapping[seq.num_processed_tokens:seq.num_processed_tokens + seq.num_tokens_to_process])
             elif seq.status == SequenceStatus.DECODING:
                 decode_seqs.append(seq)
@@ -243,11 +243,6 @@ class ModelRunner:
         input_ids, positions = self.prepare(seqs)
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
         logits = self.run_model(input_ids, positions)
-
-        if logits[0].argmax() == 34378 or logits[0].argmax() == 6902:
-            import pdb; pdb.set_trace()
-
-        print(logits[0].max(), logits[0].argmax())
         token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
         reset_context()
         return token_ids
@@ -264,7 +259,7 @@ class ModelRunner:
         context_lens = torch.zeros(max_bs, dtype=torch.int32)
         block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
         outputs = torch.zeros(max_bs, hf_config.hidden_size)
-        self.graph_bs = list(range(1, 8)) + list(range(8, max_bs + 1, 8))
+        self.graph_bs = list(range(1, 32)) + list(range(32, max_bs + 1, 8))
         self.graphs = {}
         self.graph_pool = None
 
