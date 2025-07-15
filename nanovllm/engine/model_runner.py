@@ -7,6 +7,7 @@ from multiprocessing.shared_memory import SharedMemory
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
+from nanovllm.models.qwen3_moe import Qwen3MoeForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
@@ -23,12 +24,17 @@ class ModelRunner:
         self.rank = rank
         self.event = event
 
-        dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
+        dist.init_process_group("nccl", f"tcp://localhost:{config.nccl_port}", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)
         torch.set_default_device("cuda")
-        self.model = Qwen3ForCausalLM(hf_config)
+        if hf_config.architectures[0] == "Qwen3ForCausalLM":
+            self.model = Qwen3ForCausalLM(hf_config)
+        elif hf_config.architectures[0] == "Qwen3MoeForCausalLM":
+            self.model = Qwen3MoeForCausalLM(hf_config)
+        else:
+            raise ValueError(f"Unsupported model architecture: {hf_config.architectures[0]}")
         load_model(self.model, config.model)
         self.sampler = Sampler()
         self.warmup_model()
