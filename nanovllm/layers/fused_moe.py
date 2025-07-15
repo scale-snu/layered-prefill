@@ -13,7 +13,7 @@ import torch.distributed as dist
 from torch.nn.parameter import UninitializedParameter
 
 from nanovllm.layers.nccl_communicator import tensor_model_parallel_all_reduce
-
+from nanovllm.layers.for_moe.utils import set_weight_attrs
 from nanovllm.layers.for_moe.fused_moe import fused_experts
 
 fused_moe_pallas = None  # type: ignore
@@ -649,7 +649,7 @@ class FusedMoE(torch.nn.Module):
         """
         from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 
-        lif custom_routing_function is None:
+        if custom_routing_function is None:
             topk_weights, topk_ids, token_expert_indices = fused_topk(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
