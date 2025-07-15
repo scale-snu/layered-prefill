@@ -647,7 +647,7 @@ class FusedMoE(torch.nn.Module):
             equivalent to global logical ids, so should be compatible with
             plain MoE implementations without redundant experts.
         """
-        from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+        from nanovllm.layers.for_moe.fused_moe import fused_topk
 
         if custom_routing_function is None:
             topk_weights, topk_ids, token_expert_indices = fused_topk(

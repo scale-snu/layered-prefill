@@ -348,14 +348,14 @@ def fused_topk(
 
     topk_softmax(
         topk_weights,
-        topk_indices,
+        topk_ids,
         token_expert_indices,
         gating_output,
     )
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
-    return topk_weights, topk_indices, token_expert_indices
+    return topk_weights, topk_ids, token_expert_indices
     
 
 def fused_experts(hidden_states: torch.Tensor,
