@@ -58,7 +58,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         self.top_k = config.num_experts_per_tok
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.moe_intermediate_size
-        
+
         # Expert networks -> IMPORTANT!! FUSED MOE!!!
         self.experts = FusedMoE(num_experts=config.num_experts,
                                 top_k=config.num_experts_per_tok,
@@ -66,7 +66,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                                 intermediate_size=config.moe_intermediate_size,
                                 reduce_results=False,
                                 renormalize=config.norm_topk_prob)
-        
+
         # Router
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.num_experts,
@@ -186,7 +186,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        
+
         self.self_attn = Qwen3MoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -198,8 +198,8 @@ class Qwen3MoeDecoderLayer(nn.Module):
             rope_theta=getattr(config, "rope_theta", 1000000),
             rope_scaling=getattr(config, "rope_scaling", None),
         )
-        
-        # MoE 또는 일반 MLP 
+
+        # MoE 또는 일반 MLP
         subnames = prefix.split(".")
         int_vals: list[int] = []
         for subname in subnames:
@@ -213,7 +213,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") else
                            config.mlp_only_layers)
         if (layer_idx not in mlp_only_layers) and (
-                config.num_experts > 0 and 
+                config.num_experts > 0 and
             (layer_idx + 1) % config.decoder_sparse_step == 0):
             self.mlp = Qwen3MoeSparseMoeBlock(config=config)
         else:
@@ -222,7 +222,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
             )
-        
+
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -314,4 +314,4 @@ class Qwen3MoeForCausalLM(nn.Module):
         hidden_states: torch.Tensor,
     ) -> Optional[torch.Tensor]:
         logits = self.lm_head(hidden_states)
-        return logits 
+        return logits

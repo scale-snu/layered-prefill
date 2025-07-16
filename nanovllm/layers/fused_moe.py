@@ -636,9 +636,9 @@ class FusedMoE(torch.nn.Module):
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Route the input hidden states to the top-k experts based on the 
+        Route the input hidden states to the top-k experts based on the
         router logits.
-        
+
         Returns:
             (topk_weights, topk_ids) (tuple[torch.Tensor, torch.Tensor]):
             The weights and *global physical* expert ids of the top-k experts.
@@ -677,7 +677,7 @@ class FusedMoE(torch.nn.Module):
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
-        assert self.quant_method is not None 
+        assert self.quant_method is not None
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
             layer=self,

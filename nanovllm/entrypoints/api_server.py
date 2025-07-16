@@ -94,6 +94,7 @@ if __name__ == "__main__":
         log_level="debug",
         host="localhost",
         port=8000,
+        nccl_port=2333,
         schedule_mode="chunked-prefill",  # or "orca" or "staged-prefill"
     )
 

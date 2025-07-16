@@ -23,7 +23,7 @@ def get_all_fused_moe_layers(module):
 
 def find_fused_moe_layer(model, layer_idx):
     layer = model
-    for part in ["layers", str(layer_idx), "mlp", "experts"]:
+    for part in ["model", "layers", str(layer_idx), "mlp", "experts"]:
         if hasattr(layer, part):
             layer = getattr(layer, part)
         elif isinstance(layer, nn.ModuleList) and part.isdigit():
@@ -59,9 +59,9 @@ def load_model(model: nn.Module, path: str):
                     # 실제 파라미터 이름: model.layers.<layer_idx>.mlp.experts.<param_name>
                     param_path = f"model.layers.{layer_idx}.mlp.experts.{param_name}"
                     moe_layer = find_fused_moe_layer(model, layer_idx)
-                    if moe_layer is not None:
-                        param = model.get_parameter(param_path)
-                        moe_layer.weight_loader(param, f.get_tensor(weight_name), weight_name, shard_id, expert_id)
+                    assert moe_layer is not None, f"FusedMoE layer not found for layer index {layer_idx}"
+                    param = model.get_parameter(param_path)
+                    moe_layer.weight_loader(param, f.get_tensor(weight_name), weight_name, shard_id, expert_id)
                     continue
                 # 2. 기존 packed_modules_mapping 처리
                 for k in packed_modules_mapping:

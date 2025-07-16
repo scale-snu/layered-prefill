@@ -14,6 +14,7 @@ class Config:
     enforce_eager: bool = False
     hf_config: AutoConfig | None = None
     eos: int = -1
+    nccl_port: int = 2333
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
     schedule_mode: str = "chunked-prefill" # or "orca" or "staged-prefill"
