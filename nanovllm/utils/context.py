@@ -13,6 +13,7 @@ class Context:
     context_lens: torch.Tensor | None = None
     prefill_block_tables: torch.Tensor | None = None
     decode_block_tables: torch.Tensor | None = None
+    prefill_compute_layers: list[int] | None = None
 
 _CONTEXT = Context()
 
@@ -29,6 +30,7 @@ def set_context(
         context_lens=None,
         prefill_block_tables=None,
         decode_block_tables=None,
+        prefill_compute_layers=None,
         ):
     global _CONTEXT
     _CONTEXT = Context(
@@ -41,6 +43,7 @@ def set_context(
         context_lens=context_lens,
         prefill_block_tables=prefill_block_tables,
         decode_block_tables=decode_block_tables,
+        prefill_compute_layers=prefill_compute_layers,
     )
 
 def reset_context():
