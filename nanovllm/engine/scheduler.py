@@ -17,6 +17,9 @@ class Scheduler:
         self.decoding: deque[Sequence] = deque()
         self.schedule_mode = config.schedule_mode
 
+        if self.schedule_mode == "staged-prefill":
+            self.stage_queue: list[deque[Sequence]] = [deque() for _ in range(config.num_stages)]
+
     def is_finished(self):
         return (
             not self.waiting
@@ -169,11 +172,75 @@ class Scheduler:
         return scheduled_seqs
 
     def staged_prefill_schedule(self) -> list[Sequence]:
-        raise NotImplementedError("Staged prefill scheduling is not implemented yet.")
+        # prefill
+        prefill_scheduled_seqs = []
+        decode_scheduled_seqs = []
+        num_seqs = 0
+
+        for stage in range(len(self.stage_queue)):
+            if (
+                self.stage_queue[stage]
+            ):
+                seq = self.stage_queue[stage][0]
+                num_tokens_to_process = len(seq) - seq.num_processed_tokens
+                seq.num_tokens_to_process = num_tokens_to_process
+
+                self.stage_queue[stage].popleft()
+                prefill_scheduled_seqs.append(seq)
+
+        if (
+            self.waiting
+            and num_seqs < self.max_num_seqs
+        ):
+            seq = self.waiting[0]
+            seq.stage = -1
+            seq.num_stages = len(self.stage_queue)
+            if self.block_manager.can_allocate(seq):
+                self.block_manager.allocate(seq)
+
+                num_tokens_to_process = len(seq) - seq.num_processed_tokens
+                seq.num_tokens_to_process = num_tokens_to_process
+
+                self.waiting.popleft()
+                prefill_scheduled_seqs.append(seq)
+
+        # decode
+        while (
+            self.decoding
+            and num_seqs < self.max_num_seqs
+        ):
+            seq = self.decoding.popleft()
+            while not self.block_manager.can_append(seq):
+                if self.decoding:
+                    self.preempt(self.decoding.pop())
+                else:
+                    self.preempt(seq)
+                    break
+            else:
+                num_seqs += 1
+                self.block_manager.may_append(seq)
+                decode_scheduled_seqs.append(seq)
+
+        if prefill_scheduled_seqs:
+            for seq in prefill_scheduled_seqs:
+                seq.status = SequenceStatus.PREFILLING
+                seq.stage += 1
+                if seq.stage < len(self.stage_queue):
+                    self.stage_queue[seq.stage].append(seq)
+
+        if decode_scheduled_seqs:
+            self.decoding.extendleft(reversed(decode_scheduled_seqs))
+
+        scheduled_seqs = prefill_scheduled_seqs + decode_scheduled_seqs
+
+        return scheduled_seqs
+
 
     def preempt(self, seq: Sequence):
         print(f"Preempting sequence {seq.seq_id} with status {seq.status}")
         seq.status = SequenceStatus.WAITING
+        seq.stage = -1
+        seq.intermediate_outputs = None
         self.block_manager.deallocate(seq)
         self.waiting.appendleft(seq)
 
@@ -184,12 +251,20 @@ class Scheduler:
             ) -> list[bool]:
         for seq, token_id in zip(seqs, token_ids):
             if seq.status == SequenceStatus.PREFILLING:
-                seq.num_processed_tokens += seq.num_tokens_to_process
+                if self.schedule_mode == "staged-prefill":
+                    if seq.stage == len(self.stage_queue) - 1:
+                        seq.status = SequenceStatus.DECODING
+                        self.stage_queue[seq.stage].remove(seq)
+                        seq.stage += 1
+                        self.decoding.append(seq)
+                        seq.num_processed_tokens += seq.num_tokens_to_process
+                else:
+                    seq.num_processed_tokens += seq.num_tokens_to_process
 
-                if seq.num_processed_tokens >= seq.num_prompt_tokens:
-                    seq.status = SequenceStatus.DECODING
-                    self.prefilling.remove(seq)
-                    self.decoding.append(seq)
+                    if seq.num_processed_tokens >= seq.num_prompt_tokens:
+                        seq.status = SequenceStatus.DECODING
+                        self.prefilling.remove(seq)
+                        self.decoding.append(seq)
 
             if seq.status == SequenceStatus.DECODING:
                 seq.append_token(token_id)
