@@ -11,6 +11,8 @@ from nanovllm.layers.linear import QKVParallelLinear, MergedColumnParallelLinear
 from nanovllm.layers.rotary_embedding import get_rope
 from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 from nanovllm.layers.fused_moe import FusedMoE
+from nanovllm.utils.context import get_context
+
 
 class Qwen3MoeMLP(nn.Module):
 
@@ -264,14 +266,105 @@ class Qwen3MoeModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        intermediate_outputs: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        hidden_states = self.get_input_embeddings(input_ids)
-        residual = None
+        context = get_context()
 
-        for layer in self.layers:
-            hidden_states, residual = layer(positions, hidden_states, residual)
-        hidden_states, _ = self.norm(hidden_states, residual)
-        return hidden_states
+        len_staged_prefill = context.cu_seqlens_q[-1] if context.is_prefill else 0
+
+        hidden_states = self.embed_tokens(input_ids)
+        residual = hidden_states.clone()
+        if context.prefill_compute_layers:
+            if intermediate_outputs is not None:
+                i_hidden_states, i_residual = intermediate_outputs
+                if i_hidden_states is not None:
+                    hidden_states = torch.cat([i_hidden_states, hidden_states[i_hidden_states.size(0):]], dim=0)
+                if i_residual is not None:
+                    residual = torch.cat([i_residual, residual[i_residual.size(0):]], dim=0)
+
+            prefill_compute_layer_map = {}
+            for idx, prefill_compute_layer in enumerate(context.prefill_compute_layers):
+                for layer_idx in prefill_compute_layer:
+                    prefill_compute_layer_map[layer_idx] = idx
+
+            for layer_idx, layer in enumerate(self.layers):
+                if layer_idx in prefill_compute_layer_map:
+                    idx = prefill_compute_layer_map[layer_idx]
+                    start_idx = context.cu_seqlens_q[idx]
+                    end_idx = context.cu_seqlens_q[idx + 1]
+                    indices = torch.cat([
+                        torch.arange(start_idx, end_idx, device=hidden_states.device),
+                        torch.arange(len_staged_prefill, hidden_states.size(0), device=hidden_states.device)
+                    ])
+                    max_seqlen_k = context.max_seqlen_k
+                    max_seqlen_q = context.max_seqlen_q
+                    context.max_seqlen_k = int(context.cu_seqlens_k[idx + 1] - context.cu_seqlens_k[idx])
+                    context.max_seqlen_q = int(context.cu_seqlens_q[idx + 1] - context.cu_seqlens_q[idx])
+                    cu_seqlens_k = context.cu_seqlens_k.clone()
+                    cu_seqlens_q = context.cu_seqlens_q.clone()
+                    context.cu_seqlens_k = cu_seqlens_k[idx:idx + 2] - cu_seqlens_k[idx]
+                    context.cu_seqlens_q = cu_seqlens_q[idx:idx + 2] - cu_seqlens_q[idx]
+                    prefill_block_tables = None
+                    if context.prefill_block_tables is not None:
+                        prefill_block_tables = context.prefill_block_tables.clone()
+                        context.prefill_block_tables = prefill_block_tables[start_idx:end_idx]
+                    slot_mapping = None
+                    if context.slot_mapping is not None:
+                        slot_mapping = context.slot_mapping.clone()
+                        context.slot_mapping = context.slot_mapping[indices]
+
+                    _hidden_states, _residual = layer(positions[indices], hidden_states[indices], residual[indices])
+                    hidden_states[indices] = _hidden_states
+                    residual[indices] = _residual
+                    context.max_seqlen_k = max_seqlen_k
+                    context.max_seqlen_q = max_seqlen_q
+                    context.cu_seqlens_k = cu_seqlens_k
+                    context.cu_seqlens_q = cu_seqlens_q
+                    context.prefill_block_tables = prefill_block_tables
+                    context.slot_mapping = slot_mapping
+                else:
+                    if hidden_states[len_staged_prefill:].size(0) > 0:
+                        is_prefill = context.is_prefill
+                        context.is_prefill = False
+                        slot_mapping = None
+                        if context.slot_mapping is not None:
+                            slot_mapping = context.slot_mapping.clone()
+                            context.slot_mapping = slot_mapping[len_staged_prefill:]
+                        _hidden_states, _residual = layer(
+                            positions[len_staged_prefill:],
+                            hidden_states[len_staged_prefill:],
+                            residual[len_staged_prefill:]
+                        )
+                        hidden_states[len_staged_prefill:] = _hidden_states
+                        residual[len_staged_prefill:] = _residual
+                        context.is_prefill = is_prefill
+                        context.slot_mapping = slot_mapping
+
+            if len(self.layers) - 1 in prefill_compute_layer_map:
+                idx = prefill_compute_layer_map[len(self.layers) - 1]
+                start_idx = context.cu_seqlens_q[idx]
+                end_idx = context.cu_seqlens_q[idx + 1]
+                indices = torch.cat([
+                    torch.arange(start_idx, end_idx, device=hidden_states.device),
+                    torch.arange(len_staged_prefill, hidden_states.size(0), device=hidden_states.device)
+                ])
+                _hidden_states, _residual = self.norm(hidden_states[indices], residual[indices])
+                hidden_states[indices] = _hidden_states
+                residual[indices] = _residual
+            else:
+                if hidden_states[len_staged_prefill:].size(0) > 0:
+                    _hidden_states, _residual = self.norm(
+                        hidden_states[len_staged_prefill:], residual[len_staged_prefill:]
+                    )
+                    hidden_states[len_staged_prefill:] = _hidden_states
+                    residual[len_staged_prefill:] = _residual
+        else:
+            for layer in self.layers:
+                hidden_states, residual = layer(positions, hidden_states, residual)
+
+            hidden_states, residual = self.norm(hidden_states, residual)
+
+        return hidden_states, residual
 
 
 class Qwen3MoeForCausalLM(nn.Module):
@@ -305,8 +398,9 @@ class Qwen3MoeForCausalLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        intermediate_outputs: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions)
+        hidden_states = self.model(input_ids, positions, intermediate_outputs)
         return hidden_states
 
     def compute_logits(

@@ -188,6 +188,8 @@ class Scheduler:
                 self.stage_queue[stage].popleft()
                 prefill_scheduled_seqs.append(seq)
 
+                break
+
         if (
             self.waiting
             and num_seqs < self.max_num_seqs
