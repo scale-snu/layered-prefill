@@ -32,6 +32,9 @@ class Sequence:
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
         self.num_generated_from_last = self.num_tokens
+        self.stage = -1
+        self.num_stages = -1
+        self.intermediate_outputs = None
 
     def __len__(self):
         return self.num_tokens

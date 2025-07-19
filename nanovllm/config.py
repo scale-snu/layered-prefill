@@ -18,6 +18,7 @@ class Config:
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
     schedule_mode: str = "chunked-prefill" # or "orca" or "staged-prefill"
+    num_stages: int = 4
 
     def __post_init__(self):
         # assert os.path.isdir(self.model)

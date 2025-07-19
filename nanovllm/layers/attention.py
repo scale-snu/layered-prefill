@@ -62,11 +62,6 @@ class Attention(nn.Module):
         v = v.view(-1, self.num_kv_heads, self.head_dim)
         context = get_context()
 
-        # print(
-        #     f"Attention forward: q={q.shape}, k={k.shape}, v={v.shape}, "
-        #     f"slot_mapping={context.slot_mapping.shape if context.slot_mapping is not None else None}, "
-        # )
-
         len_prefill = context.cu_seqlens_q[-1] if context.is_prefill else 0
 
         k_cache, v_cache = self.k_cache, self.v_cache
@@ -80,8 +75,8 @@ class Attention(nn.Module):
             )
 
         os = []
-        if context.is_prefill:
-            if context.prefill_block_tables is not None:    # chunked prefill
+        if context.is_prefill and len_prefill > 0:
+            if context.prefill_block_tables is not None:  # chunked prefill
                 k, v = k_cache, v_cache
             else:
                 k = k[:len_prefill]

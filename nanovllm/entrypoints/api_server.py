@@ -87,7 +87,7 @@ if __name__ == "__main__":
         # model="/data3/cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/e6de91484c29aa9480d55605af694f39b081c455/",
         max_num_batched_tokens=512,
         max_num_seqs=64,
-        max_model_len=8192,
+        max_model_len=16384,
         gpu_memory_utilization=0.9,
         tensor_parallel_size=1,
         enforce_eager=False,
@@ -95,7 +95,9 @@ if __name__ == "__main__":
         host="localhost",
         port=8000,
         nccl_port=2333,
-        schedule_mode="chunked-prefill",  # or "orca" or "staged-prefill"
+        schedule_mode="staged-prefill",  # or "orca" or "staged-prefill"
+        # schedule_mode="chunked-prefill",  # or "orca" or "staged-prefill"
+        num_stages=2,
     )
 
     # Create the system config from the config.

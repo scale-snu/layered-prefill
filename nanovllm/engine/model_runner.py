@@ -1,4 +1,5 @@
 import pickle
+import numpy as np
 import torch
 import torch.distributed as dist
 from multiprocessing.synchronize import Event
@@ -131,6 +132,7 @@ class ModelRunner:
                 module.k_cache = self.kv_cache[0, layer_id]
                 module.v_cache = self.kv_cache[1, layer_id]
                 layer_id += 1
+        self.num_layers = layer_id
 
     def prepare_block_tables(self, seqs: list[Sequence]):
         if not seqs:
@@ -152,6 +154,9 @@ class ModelRunner:
 
         prefill_seqs = []
         decode_seqs = []
+        prefill_compute_layers = []
+        inter_hidden_states = []
+        inter_residual = []
         for seq in seqs:
             if seq.status == SequenceStatus.PREFILLING:
                 prefill_seqs.append(seq)
@@ -176,6 +181,14 @@ class ModelRunner:
                     seq_slot_mapping.extend(list(range(start, end)))
 
                 slot_mapping.extend(seq_slot_mapping[seq.num_processed_tokens:seq.num_processed_tokens + seq.num_tokens_to_process])
+
+                if seq.stage != -1:
+                    prefill_compute_layers.append(np.arange(self.num_layers).reshape(seq.num_stages, -1)[seq.stage].tolist())
+                    i_hidden_states, i_residual = seq.intermediate_outputs if seq.intermediate_outputs else (None, None)
+                    if i_hidden_states is not None:
+                        inter_hidden_states.append(i_hidden_states)
+                    if i_residual is not None:
+                        inter_residual.append(i_residual)
             elif seq.status == SequenceStatus.DECODING:
                 decode_seqs.append(seq)
                 input_ids.append(seq.last_token)
@@ -198,6 +211,8 @@ class ModelRunner:
         cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        inter_hidden_states = torch.cat(inter_hidden_states, dim=0) if inter_hidden_states else None
+        inter_residual = torch.cat(inter_residual, dim=0) if inter_residual else None
 
         set_context(
             is_prefill,
@@ -209,8 +224,9 @@ class ModelRunner:
             context_lens,
             prefill_block_tables,
             decode_block_tables,
+            prefill_compute_layers,
         )
-        return input_ids, positions
+        return input_ids, positions, (inter_hidden_states, inter_residual)
 
     def prepare_sample(self, seqs: list[Sequence]):
         temperatures = []
@@ -220,7 +236,7 @@ class ModelRunner:
         return temperatures
 
     @torch.inference_mode()
-    def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor):
+    def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, intermediate_outputs = None):
         context = get_context()
 
         if (
@@ -228,7 +244,8 @@ class ModelRunner:
             or self.enforce_eager
             or input_ids.size(0) > 512
         ):
-            return self.model.compute_logits(self.model(input_ids, positions))
+            hidden_states, residual = self.model(input_ids, positions, intermediate_outputs)
+            return hidden_states, residual
         else:
             bs = input_ids.size(0)
             context = get_context()
@@ -243,12 +260,28 @@ class ModelRunner:
             graph_vars["context_lens"][:bs] = context.context_lens
             graph_vars["block_tables"][:bs, :context.decode_block_tables.size(1)] = context.decode_block_tables
             graph.replay()
-            return self.model.compute_logits(graph_vars["outputs"][:bs])
+            return graph_vars["outputs"][:bs], None
 
     def run(self, seqs: list[Sequence]) -> list[int]:
-        input_ids, positions = self.prepare(seqs)
+        input_ids, positions, intermediate_outputs = self.prepare(seqs)
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
-        logits = self.run_model(input_ids, positions)
+        hidden_states, residual = self.run_model(input_ids, positions, intermediate_outputs)
+        start_idx = 0
+        for seq in seqs:
+            end_idx = start_idx + seq.num_tokens_to_process
+            if seq.stage != -1:
+                i_hidden_states = hidden_states
+                if hidden_states is not None:
+                    i_hidden_states = hidden_states[start_idx:end_idx]
+                i_residual = residual
+                if residual is not None:
+                    i_residual = residual[start_idx:end_idx]
+                seq.intermediate_outputs = (i_hidden_states, i_residual)
+            if seq.stage == seq.num_stages:
+                seq.intermediate_outputs = None
+            start_idx = end_idx
+        with torch.inference_mode():
+            logits = self.model.compute_logits(hidden_states)
         token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
         reset_context()
         return token_ids
@@ -272,9 +305,9 @@ class ModelRunner:
         for bs in reversed(self.graph_bs):
             graph = torch.cuda.CUDAGraph()
             set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], decode_block_tables=block_tables[:bs])
-            outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
+            outputs[:bs] = self.model(input_ids[:bs], positions[:bs])[0]    # warmup
             with torch.cuda.graph(graph, self.graph_pool):
-                outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # capture
+                outputs[:bs] = self.model(input_ids[:bs], positions[:bs])[0]    # capture
             if self.graph_pool is None:
                 self.graph_pool = graph.pool()
             self.graphs[bs] = graph
