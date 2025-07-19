@@ -17,7 +17,14 @@ class Config:
     nccl_port: int = 2333
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
+    # 스케줄링 모드 설정
+    # "chunked-prefill": 프롬프트를 청크 단위로 나누어 처리 (기본값)
+    # "orca": 프롬프트를 한 번에 완전히 처리
+    # "staged-prefill": 프롬프트를 여러 단계로 나누어 처리
     schedule_mode: str = "chunked-prefill" # or "orca" or "staged-prefill"
+    # Staged-Prefill 모드에서 사용할 단계 수
+    # 각 단계마다 별도의 큐가 생성되어 시퀀스를 단계별로 관리
+    # 예: num_stages=4이면 4단계로 나누어 처리
     num_stages: int = 4
 
     def __post_init__(self):

@@ -80,24 +80,59 @@ async def generate(request: Request) -> Response:
     return JSONResponse(ret)
 
 
+def parse_args() -> APIServerConfig:
+    """Parse command line arguments and return the config."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="API server for AsyncLLMEngine.")
+    parser.add_argument("--model", type=str, required=True, help="Path to the model directory.")
+    parser.add_argument("--max-num-batched-tokens", type=int, default=512,
+                        help="Maximum number of tokens to batch together for generation.")
+    parser.add_argument("--max-num-seqs", type=int, default=64,
+                        help="Maximum number of sequences to generate in parallel.")
+    parser.add_argument("--max-model-len", type=int, default=16384,
+                        help="Maximum length of the model input sequence.")
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.9,
+                        help="GPU memory utilization for the model.")
+    parser.add_argument("--tensor-parallel-size", type=int, default=1,
+                        help="Tensor parallel size for the model.")
+    parser.add_argument("--enforce-eager", action="store_true",
+                        help="Whether to enforce eager execution mode.")
+    parser.add_argument("--log-level", type=str, default="debug",
+                        help="Logging level for the server.")
+    parser.add_argument("--host", type=str, default="localhost",
+                        help="Host address for the API server.")
+    parser.add_argument("--port", type=int, default=8000,
+                        help="Port for the API server.")
+    parser.add_argument("--nccl-port", type=int, default=2333,
+                        help="NCCL port for distributed training.")
+    parser.add_argument("--schedule-mode", type=str, default="staged-prefill",
+                        choices=["staged-prefill", "orca", "chunked-prefill"],
+                        help="Scheduling mode for the generation.")
+    parser.add_argument("--num-stages", type=int, default=2,
+                        help="Number of stages for staged prefill scheduling.")
+    args = parser.parse_args()
+
+    return args
+
+
 if __name__ == "__main__":
+    args = parse_args()
+
     config = APIServerConfig(
-        model="/data3/cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B/snapshots/ae659febe817e4b3ebd7355f47792725801204c9/",
-        # model="/data3/cache/huggingface/hub/models--Qwen--Qwen3-32B/snapshots/d47b0d4ae4b48fde975756bf360a63a9cca8d470/",
-        # model="/data3/cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/e6de91484c29aa9480d55605af694f39b081c455/",
-        max_num_batched_tokens=512,
-        max_num_seqs=64,
-        max_model_len=16384,
-        gpu_memory_utilization=0.9,
-        tensor_parallel_size=1,
-        enforce_eager=False,
-        log_level="debug",
-        host="localhost",
-        port=8000,
-        nccl_port=2333,
-        schedule_mode="staged-prefill",  # or "orca" or "staged-prefill"
-        # schedule_mode="chunked-prefill",  # or "orca" or "staged-prefill"
-        num_stages=2,
+        model=args.model,
+        max_num_batched_tokens=args.max_num_batched_tokens,
+        max_num_seqs=args.max_num_seqs,
+        max_model_len=args.max_model_len,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        tensor_parallel_size=args.tensor_parallel_size,
+        enforce_eager=args.enforce_eager,
+        log_level=args.log_level,
+        host=args.host,
+        port=args.port,
+        nccl_port=args.nccl_port,
+        schedule_mode=args.schedule_mode,
+        num_stages=args.num_stages,
     )
 
     # Create the system config from the config.
