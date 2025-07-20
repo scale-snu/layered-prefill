@@ -143,6 +143,10 @@ class ModelRunner:
         return block_tables
 
     def prepare(self, seqs: list[Sequence]):
+        """
+        모델 실행을 위한 입력 데이터 준비
+        Staged-Prefill 모드에서는 단계별로 다른 처리가 필요
+        """
         input_ids = []
         positions = []
         cu_seqlens_q = [0]

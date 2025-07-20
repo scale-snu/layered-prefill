@@ -32,8 +32,14 @@ class Sequence:
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
         self.num_generated_from_last = self.num_tokens
+        
+        # Staged-Prefill 관련 필드들
+        # stage: 현재 시퀀스가 처리 중인 단계 (-1: 새로운 시퀀스, 0~num_stages-1: 각 단계)
         self.stage = -1
+        # num_stages: 전체 단계 수 (스케줄러의 stage_queue 길이와 동일)
         self.num_stages = -1
+        # intermediate_outputs: 각 단계에서 생성된 중간 출력 (hidden_states, residual)
+        # 다음 단계에서 이전 단계의 출력을 재사용하기 위해 저장
         self.intermediate_outputs = None
 
     def __len__(self):
@@ -81,6 +87,9 @@ class Sequence:
         return self.token_ids[i*self.block_size: (i+1)*self.block_size]
 
     def append_token(self, token_id: int):
+        """
+        디코딩 단계에서 새로 생성된 토큰을 시퀀스에 추가
+        """
         self.token_ids.append(token_id)
         self.last_token = token_id
         self.num_tokens += 1
