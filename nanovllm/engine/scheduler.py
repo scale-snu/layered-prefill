@@ -48,16 +48,31 @@ class Scheduler:
         # prefill
         prefill_scheduled_seqs = []
         decode_scheduled_seqs = []
-        num_seqs = 0
         num_batched_tokens = 0
 
+        # decode
+        while (
+            self.decoding
+            and num_batched_tokens < self.max_num_batched_tokens
+        ):
+            seq = self.decoding.popleft()
+            while not self.block_manager.can_append(seq):
+                if self.decoding:
+                    self.preempt(self.decoding.pop())
+                else:
+                    self.preempt(seq)
+                    break
+            else:
+                num_batched_tokens += 1
+                self.block_manager.may_append(seq)
+                decode_scheduled_seqs.append(seq)
+        
+        # prefill
         while (
             self.prefilling
-            and num_seqs < self.max_num_seqs
             and num_batched_tokens < self.max_num_batched_tokens
         ):
             seq = self.prefilling[0]
-            num_seqs += 1
             num_tokens_to_process = min(
                 len(seq) - seq.num_processed_tokens,
                 self.max_num_batched_tokens - num_batched_tokens,
@@ -70,13 +85,11 @@ class Scheduler:
 
         while (
             self.waiting
-            and num_seqs < self.max_num_seqs
             and num_batched_tokens < self.max_num_batched_tokens
         ):
             seq = self.waiting[0]
             if not self.block_manager.can_allocate(seq):
                 break
-            num_seqs += 1
             self.block_manager.allocate(seq)
 
             num_tokens_to_process = min(
@@ -88,23 +101,6 @@ class Scheduler:
 
             self.waiting.popleft()
             prefill_scheduled_seqs.append(seq)
-
-        # decode
-        while (
-            self.decoding
-            and num_seqs < self.max_num_seqs
-        ):
-            seq = self.decoding.popleft()
-            while not self.block_manager.can_append(seq):
-                if self.decoding:
-                    self.preempt(self.decoding.pop())
-                else:
-                    self.preempt(seq)
-                    break
-            else:
-                num_seqs += 1
-                self.block_manager.may_append(seq)
-                decode_scheduled_seqs.append(seq)
 
         if prefill_scheduled_seqs:
             for seq in prefill_scheduled_seqs:
@@ -178,7 +174,7 @@ class Scheduler:
     def staged_prefill_schedule(self) -> list[Sequence]:
         """
         Staged-Prefill 스케줄링: 프롬프트 처리를 여러 단계로 나누어 처리
-        
+
         핵심 아이디어:
         1. 각 단계에서 하나의 시퀀스만 처리하여 메모리 사용량 제어
         2. 단계별로 중간 출력을 저장하고 재사용
@@ -209,6 +205,7 @@ class Scheduler:
         if (
             self.waiting
             and num_seqs < self.max_num_seqs
+            and not prefill_scheduled_seqs
         ):
             seq = self.waiting[0]  # 대기 큐의 첫 번째 시퀀스
             seq.stage = -1  # 새로운 시퀀스는 stage -1로 시작

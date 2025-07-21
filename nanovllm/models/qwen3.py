@@ -15,7 +15,7 @@ from nanovllm.utils.context import get_context
 class Qwen3Attention(nn.Module):
     """
     Qwen3 모델의 어텐션 레이어
-    
+
     Tensor Parallelism을 지원하며, QK-Norm과 RoPE를 포함합니다.
     Staged-Prefill 모드에서는 단계별로 다른 레이어들을 계산할 수 있습니다.
     """
@@ -34,7 +34,7 @@ class Qwen3Attention(nn.Module):
     ) -> None:
         """
         Qwen3Attention 초기화
-        
+
         Args:
             hidden_size: 히든 상태 차원
             num_heads: 어텐션 헤드 수
@@ -48,16 +48,16 @@ class Qwen3Attention(nn.Module):
         """
         super().__init__()
         tp_size = dist.get_world_size()  # Tensor Parallelism 크기
-        
+
         # 헤드 수 설정 (Tensor Parallelism 고려)
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
-        
+
         self.total_num_kv_heads = num_kv_heads
         assert self.total_num_kv_heads % tp_size == 0
         self.num_kv_heads = self.total_num_kv_heads // tp_size
-        
+
         # 헤드 차원 및 크기 계산
         self.head_dim = head_dim or hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
@@ -72,14 +72,14 @@ class Qwen3Attention(nn.Module):
             self.total_num_kv_heads,
             bias=qkv_bias,
         )
-        
+
         # 출력 프로젝션
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
         )
-        
+
         # RoPE (Rotary Position Embedding) 설정
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -88,7 +88,7 @@ class Qwen3Attention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
-        
+
         # 어텐션 계산 (Flash Attention 사용)
         self.attn = Attention(
             self.num_heads,
@@ -96,7 +96,7 @@ class Qwen3Attention(nn.Module):
             self.scaling,
             self.num_kv_heads,
         )
-        
+
         # QK-Norm (Query-Key 정규화)
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -108,33 +108,33 @@ class Qwen3Attention(nn.Module):
     ) -> torch.Tensor:
         """
         어텐션 계산 수행
-        
+
         Args:
             positions: 위치 정보 텐서
             hidden_states: 입력 히든 상태
-            
+
         Returns:
             어텐션 출력
         """
         # QKV 프로젝션 및 분할
         qkv = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        
+
         # QK-Norm 적용
         q_by_head = q.view(-1, self.num_heads, self.head_dim)
         q_by_head = self.q_norm(q_by_head)
         q = q_by_head.view(q.shape)
-        
+
         k_by_head = k.view(-1, self.num_kv_heads, self.head_dim)
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
-        
+
         # RoPE 적용
         q, k = self.rotary_emb(positions, q, k)
-        
+
         # 어텐션 계산
         o = self.attn(q, k, v)
-        
+
         # 출력 프로젝션
         output = self.o_proj(o)
         return output
@@ -143,7 +143,7 @@ class Qwen3Attention(nn.Module):
 class Qwen3MLP(nn.Module):
     """
     Qwen3 모델의 MLP 레이어
-    
+
     SwiGLU 활성화 함수를 사용하는 2-layer MLP입니다.
     """
 
@@ -155,28 +155,28 @@ class Qwen3MLP(nn.Module):
     ) -> None:
         """
         Qwen3MLP 초기화
-        
+
         Args:
             hidden_size: 입력/출력 히든 상태 차원
             intermediate_size: 중간 레이어 차원
             hidden_act: 활성화 함수 (현재는 "silu"만 지원)
         """
         super().__init__()
-        
+
         # Gate와 Up 프로젝션을 병합한 선형 레이어
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,  # gate와 up을 위한 두 개의 출력
             bias=False,
         )
-        
+
         # Down 프로젝션
         self.down_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
             bias=False,
         )
-        
+
         # 활성화 함수 검증 및 설정
         assert hidden_act == "silu"
         self.act_fn = SiluAndMul()  # SwiGLU 활성화
@@ -184,10 +184,10 @@ class Qwen3MLP(nn.Module):
     def forward(self, x):
         """
         MLP 순전파
-        
+
         Args:
             x: 입력 텐서
-            
+
         Returns:
             MLP 출력
         """
@@ -200,7 +200,7 @@ class Qwen3MLP(nn.Module):
 class Qwen3DecoderLayer(nn.Module):
     """
     Qwen3 모델의 디코더 레이어
-    
+
     Self-Attention과 MLP를 포함하며, Pre-LayerNorm 구조를 사용합니다.
     Staged-Prefill 모드에서 단계별 처리를 지원합니다.
     """
@@ -211,12 +211,12 @@ class Qwen3DecoderLayer(nn.Module):
     ) -> None:
         """
         Qwen3DecoderLayer 초기화
-        
+
         Args:
             config: Qwen3 설정 객체
         """
         super().__init__()
-        
+
         # Self-Attention 레이어
         self.self_attn = Qwen3Attention(
             hidden_size=config.hidden_size,
@@ -229,14 +229,14 @@ class Qwen3DecoderLayer(nn.Module):
             rope_theta=getattr(config, "rope_theta", 1000000),
             rope_scaling=getattr(config, "rope_scaling", None),
         )
-        
+
         # MLP 레이어
         self.mlp = Qwen3MLP(
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
         )
-        
+
         # Layer Normalization
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -249,12 +249,12 @@ class Qwen3DecoderLayer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         디코더 레이어 순전파
-        
+
         Args:
             positions: 위치 정보
             hidden_states: 입력 히든 상태
             residual: 잔차 연결 (None이면 초기화)
-            
+
         Returns:
             (hidden_states, residual): 출력 히든 상태와 잔차
         """
@@ -264,13 +264,13 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        
+
         # Self-Attention
         hidden_states = self.self_attn(positions, hidden_states)
-        
+
         # Post-Attention LayerNorm
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        
+
         # MLP
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
@@ -279,7 +279,7 @@ class Qwen3DecoderLayer(nn.Module):
 class Qwen3Model(nn.Module):
     """
     Qwen3 모델의 메인 클래스
-    
+
     토큰 임베딩, 디코더 레이어들, 그리고 최종 정규화를 포함합니다.
     Staged-Prefill 모드에서 단계별 레이어 계산을 지원합니다.
     """
@@ -290,18 +290,18 @@ class Qwen3Model(nn.Module):
     ) -> None:
         """
         Qwen3Model 초기화
-        
+
         Args:
             config: Qwen3 설정 객체
         """
         super().__init__()
-        
+
         # 토큰 임베딩 (Vocabulary Parallelism 지원)
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
-        
+
         # 디코더 레이어들
         self.layers = nn.ModuleList([Qwen3DecoderLayer(config) for _ in range(config.num_hidden_layers)])
-        
+
         # 최종 정규화
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -313,12 +313,12 @@ class Qwen3Model(nn.Module):
     ) -> torch.Tensor:
         """
         모델 순전파
-        
+
         Args:
             input_ids: 입력 토큰 ID들
             positions: 위치 정보
             intermediate_outputs: Staged-Prefill용 중간 출력 (hidden_states, residual)
-            
+
         Returns:
             (hidden_states, residual): 최종 히든 상태와 잔차
         """
@@ -330,7 +330,7 @@ class Qwen3Model(nn.Module):
         # 토큰 임베딩 및 초기 잔차 설정
         hidden_states = self.embed_tokens(input_ids)
         residual = hidden_states.clone()
-        
+
         # ===== STAGED-PREFILL 모드 처리 =====
         if context.prefill_compute_layers:
             # 중간 출력이 있으면 재사용 (이전 단계의 결과)
@@ -356,41 +356,44 @@ class Qwen3Model(nn.Module):
                     idx = prefill_compute_layer_map[layer_idx]
                     start_idx = context.cu_seqlens_q[idx]
                     end_idx = context.cu_seqlens_q[idx + 1]
-                    
+
                     # 처리할 인덱스 계산 (현재 단계 + 디코딩 부분)
                     indices = torch.cat([
                         torch.arange(start_idx, end_idx, device=hidden_states.device),
                         torch.arange(len_staged_prefill, hidden_states.size(0), device=hidden_states.device)
                     ])
-                    
+
                     # 컨텍스트 정보 백업 및 수정
                     max_seqlen_k = context.max_seqlen_k
                     max_seqlen_q = context.max_seqlen_q
                     context.max_seqlen_k = int(context.cu_seqlens_k[idx + 1] - context.cu_seqlens_k[idx])
                     context.max_seqlen_q = int(context.cu_seqlens_q[idx + 1] - context.cu_seqlens_q[idx])
-                    
+
                     # 시퀀스 길이 정보 수정
                     cu_seqlens_k = context.cu_seqlens_k.clone()
                     cu_seqlens_q = context.cu_seqlens_q.clone()
                     context.cu_seqlens_k = cu_seqlens_k[idx:idx + 2] - cu_seqlens_k[idx]
                     context.cu_seqlens_q = cu_seqlens_q[idx:idx + 2] - cu_seqlens_q[idx]
-                    
+
                     # 블록 테이블 및 슬롯 매핑 수정
                     prefill_block_tables = None
                     if context.prefill_block_tables is not None:
                         prefill_block_tables = context.prefill_block_tables.clone()
                         context.prefill_block_tables = prefill_block_tables[start_idx:end_idx]
-                    
+
                     slot_mapping = None
                     if context.slot_mapping is not None:
                         slot_mapping = context.slot_mapping.clone()
                         context.slot_mapping = context.slot_mapping[indices]
 
                     # 레이어 실행
-                    _hidden_states, _residual = layer(positions[indices], hidden_states[indices], residual[indices])
+                    if layer_idx == 0:
+                        _hidden_states, _residual = layer(positions[indices], hidden_states[indices], None)
+                    else:
+                        _hidden_states, _residual = layer(positions[indices], hidden_states[indices], residual[indices])
                     hidden_states[indices] = _hidden_states
                     residual[indices] = _residual
-                    
+
                     # 컨텍스트 정보 복원
                     context.max_seqlen_k = max_seqlen_k
                     context.max_seqlen_q = max_seqlen_q
@@ -404,22 +407,25 @@ class Qwen3Model(nn.Module):
                         # PREFILLING 모드를 일시적으로 비활성화
                         is_prefill = context.is_prefill
                         context.is_prefill = False
-                        
+
                         # 슬롯 매핑 수정
                         slot_mapping = None
                         if context.slot_mapping is not None:
                             slot_mapping = context.slot_mapping.clone()
                             context.slot_mapping = slot_mapping[len_staged_prefill:]
-                        
+
                         # 디코딩 부분만 레이어 실행
-                        _hidden_states, _residual = layer(
-                            positions[len_staged_prefill:],
-                            hidden_states[len_staged_prefill:],
-                            residual[len_staged_prefill:]
-                        )
+                        if layer_idx == 0:
+                            _hidden_states, _residual = layer(positions[len_staged_prefill:], hidden_states[len_staged_prefill:], None)
+                        else:
+                            _hidden_states, _residual = layer(
+                                positions[len_staged_prefill:],
+                                hidden_states[len_staged_prefill:],
+                                residual[len_staged_prefill:]
+                            )
                         hidden_states[len_staged_prefill:] = _hidden_states
                         residual[len_staged_prefill:] = _residual
-                        
+
                         # 컨텍스트 복원
                         context.is_prefill = is_prefill
                         context.slot_mapping = slot_mapping
@@ -460,11 +466,11 @@ class Qwen3Model(nn.Module):
 class Qwen3ForCausalLM(nn.Module):
     """
     Qwen3 언어 모델 클래스
-    
+
     토큰 생성과 로짓 계산을 담당합니다.
     Staged-Prefill 모드를 완전히 지원합니다.
     """
-    
+
     # 모듈 매핑 (가중치 로딩용)
     packed_modules_mapping = {
         "q_proj": ("qkv_proj", "q"),
@@ -480,16 +486,16 @@ class Qwen3ForCausalLM(nn.Module):
     ) -> None:
         """
         Qwen3ForCausalLM 초기화
-        
+
         Args:
             config: Qwen3 설정 객체
         """
         super().__init__()
         self.model = Qwen3Model(config)
-        
+
         # 언어 모델 헤드 (Vocabulary Parallelism 지원)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size)
-        
+
         # 가중치 공유 (선택적)
         if config.tie_word_embeddings:
             self.lm_head.weight.data = self.model.embed_tokens.weight.data
@@ -502,12 +508,12 @@ class Qwen3ForCausalLM(nn.Module):
     ) -> torch.Tensor:
         """
         모델 순전파
-        
+
         Args:
             input_ids: 입력 토큰 ID들
             positions: 위치 정보
             intermediate_outputs: Staged-Prefill용 중간 출력
-            
+
         Returns:
             최종 히든 상태
         """
@@ -520,10 +526,10 @@ class Qwen3ForCausalLM(nn.Module):
     ) -> torch.Tensor:
         """
         로짓 계산
-        
+
         Args:
             hidden_states: 히든 상태
-            
+
         Returns:
             로짓 텐서
         """
