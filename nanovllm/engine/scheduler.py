@@ -193,6 +193,7 @@ class Scheduler:
         if (
             self.waiting
             and num_seqs < self.max_num_seqs
+            and not prefill_scheduled_seqs
         ):
             seq = self.waiting[0]
             seq.stage = -1

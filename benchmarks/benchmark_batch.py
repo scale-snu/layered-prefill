@@ -12,6 +12,8 @@ from nanovllm.sampling_params import SamplingParams
 from nanovllm.engine.async_llm_engine import AsyncLLMEngine
 from nanovllm.entrypoints.config import APIServerConfig
 
+GPU_ID = int(os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0])
+
 
 def check_gpu_memory(gpu_id):
     try:
@@ -63,10 +65,11 @@ def run_command(command):
 if __name__ == "__main__":
     server_configs = {
         "models": [
+            # "/data/cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/9c925d64d72725edaf899c6cb9c377fd0709d9c5/",
             "/data/cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B/snapshots/ae659febe817e4b3ebd7355f47792725801204c9/",
-            "/data/cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/9c925d64d72725edaf899c6cb9c377fd0709d9c5/",
         ],
-        "max_num_batched_tokens": [256, 512, 1024, 2048],
+        # "max_num_batched_tokens": [256, 512, 1024],
+        "max_num_batched_tokens": [512],
         "max_num_seqs": [16],
         "max_model_len": [16384],
         "gpu_memory_utilization": [0.9],
@@ -74,17 +77,19 @@ if __name__ == "__main__":
         "enforce_eager": [False],
         "log_level": ["debug"],
         "host": ["localhost"],
-        "port": [8000],
-        "nccl_port": [2333],
+        "port": [8001],
+        "nccl_port": [2334],
         "schedule_mode": ["staged-prefill", "chunked-prefill"],
-        "num_stages": [2, 4, 8, 16],
+        "num_stages": [2, 4],
     }
     request_configs = {
         "input_lengths": [1024, 16384],
-        "output_lengths": [128, 256],
-        "request_rate": [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1, 2, 4, 8],
-        "num_requests": [100],
+        "output_lengths": [128],
+        "request_rate": [0.1, 0.125, 0.15, 0.175, 0.2, 1, 1.2, 1.3, 1.5, 1.7, 1.8, 2, 2.5, 3],
+        "num_requests": [300],
     }
+    MAX_TIME = 300
+
     for model, max_num_batched_tokens, max_num_seqs, max_model_len, gpu_memory_utilization, tensor_parallel_size, enforce_eager, log_level, host, port, nccl_port, schedule_mode, num_stages in itertools.product(
         server_configs["models"],
         server_configs["max_num_batched_tokens"],
@@ -100,10 +105,10 @@ if __name__ == "__main__":
         server_configs["schedule_mode"],
         server_configs["num_stages"]
     ):
-        if schedule_mode == "staged-prefill":
-            if num_stages != 2: continue
-        elif schedule_mode == "chunked-prefill":
-            if max_num_batched_tokens != 256: continue
+        if schedule_mode == "chunked-prefill":
+            num_stages = 2
+        elif schedule_mode == "staged-prefill":
+            max_num_batched_tokens = 256
         print(f"Running benchmark with config: {model}, {max_num_batched_tokens}, {max_num_seqs}, {max_model_len}, {gpu_memory_utilization}, {tensor_parallel_size}, {enforce_eager}, {log_level}, {host}, {port}, {nccl_port}, {schedule_mode}, {num_stages}")
 
         server_command = f"python -m nanovllm.entrypoints.api_server --model {model} --max-num-batched-tokens {max_num_batched_tokens} --max-num-seqs {max_num_seqs} --max-model-len {max_model_len} --gpu-memory-utilization {gpu_memory_utilization} --tensor-parallel-size {tensor_parallel_size} --enforce-eager {'--enforce-eager' if enforce_eager else ''} --log-level {log_level} --host {host} --port {port} --nccl-port {nccl_port} --schedule-mode {schedule_mode} --num-stages {num_stages}"
@@ -128,6 +133,20 @@ if __name__ == "__main__":
             request_configs["request_rate"],
             request_configs["num_requests"]
         ):
+            if schedule_mode == "staged-prefill":
+                if num_stages == 2:
+                    input_length = 1024
+                elif num_stages == 4:
+                    input_length = 16384
+
+            if input_length == 16384:
+                if request_rate > 0.2:
+                    request_rate = 0.2
+            elif input_length == 1024:
+                num_stages = 2
+                if request_rate < 1:
+                    request_rate = 1
+            num_requests = min(num_requests, int(MAX_TIME / (1 / request_rate)))
             print(f"Running benchmark with request config: {input_length}, {output_length}, {request_rate}, {num_requests}")
 
             log_filename = f"logs/benchmark_{model.split('/')[-4]}_{max_num_batched_tokens}_{max_num_seqs}_{max_model_len}_{gpu_memory_utilization}_{tensor_parallel_size}_{enforce_eager}_{log_level}_{host}_{port}_{nccl_port}_{schedule_mode}_{num_stages}_{input_length}_{output_length}_{request_rate}_{num_requests}.log"
@@ -146,8 +165,13 @@ if __name__ == "__main__":
             print(f"Benchmark ({input_length}, {output_length}, {request_rate}, {num_requests}) completed with return code: {benchmark_process.returncode}")
 
         # Terminate the server process
-        while not check_gpu_memory(0):
-            for p in psutil.Process(server_process.pid).children(recursive=True):
+        while not check_gpu_memory(GPU_ID):
+            try:
+                processes = psutil.Process(server_process.pid).children(recursive=True)
+            except psutil.NoSuchProcess:
+                print("Server process has already terminated.")
+                break
+            for p in processes:
                 print(f"Terminating child process: {p.pid}")
                 p.terminate()
             print(f"Terminating server process: {server_process.pid}")
@@ -156,4 +180,4 @@ if __name__ == "__main__":
 
         print("GPU memory is released.")
         # Check GPU memory release
-        wait_for_gpu_memory_release(0)
+        wait_for_gpu_memory_release(GPU_ID)
