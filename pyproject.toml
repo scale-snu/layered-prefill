@@ -18,10 +18,12 @@ dependencies = [
     "flash-attn",
     "xxhash",
     "aiohttp",
+    "fastapi",
     "uvicorn",
     "pandas",
     "datasets",
     "pillow",
+    "psutil",
 ]
 
 [project.urls]

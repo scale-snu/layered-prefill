@@ -209,6 +209,7 @@ class Scheduler:
         if (
             self.waiting
             and num_seqs < self.max_num_seqs
+            and not prefill_scheduled_seqs
         ):
             seq = self.waiting[0]  # 대기 큐의 첫 번째 시퀀스
             seq.stage = -1  # 새로운 시퀀스는 stage -1로 시작
