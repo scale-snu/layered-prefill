@@ -74,8 +74,7 @@ async def generate(request: Request) -> Response:
         final_output = request_output
 
     assert final_output is not None
-    prompt = final_output.prompt
-    text_outputs = prompt + final_output.text
+    text_outputs = prompt + final_output[1]
     ret = {"text": text_outputs}
     return JSONResponse(ret)
 
