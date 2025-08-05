@@ -23,7 +23,7 @@ class ModelRunner:
     def __init__(self, config: Config, rank: int, event: Event | list[Event]):
         """
         ModelRunner 초기화
-        
+
         Args:
             config: 설정 객체
             rank: 현재 프로세스의 랭크 (0: 메인 프로세스, 1~: 워커 프로세스)
@@ -40,12 +40,12 @@ class ModelRunner:
         # NCCL을 사용한 분산 통신 초기화
         dist.init_process_group("nccl", f"tcp://localhost:{config.nccl_port}", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)  # 현재 프로세스의 CUDA 디바이스 설정
-        
+
         # 기본 dtype과 디바이스 설정 (모델 로딩을 위해)
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)
         torch.set_default_device("cuda")
-        
+
         # 모델 아키텍처에 따라 적절한 모델 클래스 선택
         if hf_config.architectures[0] == "Qwen3ForCausalLM":
             self.model = Qwen3ForCausalLM(hf_config)
@@ -53,19 +53,19 @@ class ModelRunner:
             self.model = Qwen3MoeForCausalLM(hf_config)
         else:
             raise ValueError(f"Unsupported model architecture: {hf_config.architectures[0]}")
-        
+
         # 모델 가중치 로딩
         load_model(self.model, config.model)
         self.sampler = Sampler()  # 토큰 샘플링을 위한 샘플러
-        
+
         # 모델 워밍업 및 KV 캐시 할당
         self.warmup_model()
         self.allocate_kv_cache()
-        
+
         # Eager 모드가 아닌 경우 CUDA 그래프 캡처
         if not self.enforce_eager:
             self.capture_cudagraph()
-        
+
         # 기본 설정 복원
         torch.set_default_device("cpu")
         torch.set_default_dtype(default_dtype)
@@ -92,11 +92,11 @@ class ModelRunner:
             dist.barrier()
             if self.rank == 0:
                 self.shm.unlink()  # 공유 메모리 삭제
-        
+
         if not self.enforce_eager:
             # CUDA 그래프 정리
             del self.graphs, self.graph_pool
-        
+
         torch.cuda.synchronize()  # CUDA 작업 완료 대기
         dist.destroy_process_group()  # 분산 프로세스 그룹 정리
 
@@ -114,13 +114,13 @@ class ModelRunner:
     def read_shm(self):
         """
         공유 메모리에서 메서드 호출 정보 읽기
-        
+
         Returns:
             tuple: (메서드명, 인자들)
         """
         assert self.world_size > 1 and self.rank  # 워커 프로세스에서만 호출 가능
         self.event.wait()  # 메인 프로세스의 신호 대기
-        
+
         # 데이터 크기 읽기 (처음 4바이트)
         n = int.from_bytes(self.shm.buf[0:4], "little")
         # 실제 데이터 읽기 및 역직렬화
@@ -131,7 +131,7 @@ class ModelRunner:
     def write_shm(self, method_name, *args):
         """
         공유 메모리에 메서드 호출 정보 쓰기
-        
+
         Args:
             method_name: 호출할 메서드명
             *args: 메서드 인자들
@@ -139,11 +139,11 @@ class ModelRunner:
         assert self.world_size > 1 and not self.rank  # 메인 프로세스에서만 호출 가능
         data = pickle.dumps([method_name, *args])  # 데이터 직렬화
         n = len(data)
-        
+
         # 데이터 크기와 실제 데이터를 공유 메모리에 쓰기
         self.shm.buf[0:4] = n.to_bytes(4, "little")
         self.shm.buf[4:n+4] = data
-        
+
         # 모든 워커 프로세스에 신호 전송
         for event in self.event:
             event.set()
@@ -151,18 +151,18 @@ class ModelRunner:
     def call(self, method_name, *args):
         """
         메서드 호출을 처리하는 래퍼
-        
+
         Args:
             method_name: 호출할 메서드명
             *args: 메서드 인자들
-            
+
         Returns:
             메서드 실행 결과
         """
         if self.world_size > 1 and self.rank == 0:
             # 메인 프로세스: 워커 프로세스들에게 명령 전송
             self.write_shm(method_name, *args)
-        
+
         # 실제 메서드 호출
         method = getattr(self, method_name, None)
         return method(*args)
@@ -174,11 +174,11 @@ class ModelRunner:
         """
         torch.cuda.empty_cache()  # CUDA 캐시 정리
         torch.cuda.reset_peak_memory_stats()  # 메모리 통계 초기화
-        
+
         # 최대 배치 크기와 모델 길이 계산
         max_num_batched_tokens, max_model_len = self.config.max_num_batched_tokens, self.config.max_model_len
         seq_lens = []
-        
+
         # 시퀀스 길이들을 계산 (최대 시퀀스 수까지)
         for _ in range(self.config.max_num_seqs):
             seq_len = min(max_num_batched_tokens, max_model_len)
@@ -202,24 +202,24 @@ class ModelRunner:
         """
         config = self.config
         hf_config = config.hf_config
-        
+
         # GPU 메모리 정보 수집
         free, total = torch.cuda.mem_get_info()
         used = total - free
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
-        
+
         # KV 캐시 블록당 필요한 메모리 계산
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
         block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * hf_config.head_dim * hf_config.torch_dtype.itemsize
-        
+
         # 사용 가능한 메모리를 고려하여 블록 수 계산
         config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
         assert config.num_kvcache_blocks > 0
-        
+
         # KV 캐시 텐서 생성 [2, num_layers, num_blocks, block_size, num_heads, head_dim]
         self.kv_cache = torch.zeros(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, hf_config.head_dim)
-        
+
         # 각 레이어에 KV 캐시 할당
         layer_id = 0
         for module in self.model.modules():
@@ -233,19 +233,19 @@ class ModelRunner:
         """
         블록 테이블 준비
         각 시퀀스의 메모리 블록 할당 정보를 텐서로 변환
-        
+
         Args:
             seqs: 시퀀스 리스트
-            
+
         Returns:
             블록 테이블 텐서 또는 None
         """
         if not seqs:
             return None
-        
+
         # 최대 블록 테이블 길이 계산
         max_len = max(len(seq.block_table) for seq in seqs) if seqs else 0
-        
+
         # 모든 시퀀스의 블록 테이블을 동일한 길이로 패딩
         block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
         block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
@@ -276,11 +276,11 @@ class ModelRunner:
                 # PREFILLING 시퀀스 처리
                 prefill_seqs.append(seq)
                 seqlen = seq.num_processed_tokens + seq.num_tokens_to_process
-                
+
                 # 입력 토큰과 위치 정보 추가
                 input_ids.extend(seq[seq.num_processed_tokens:seqlen])
                 positions.extend(list(range(seq.num_processed_tokens, seqlen)))
-                
+
                 # 시퀀스 길이 정보 업데이트
                 seqlen_q = seq.num_tokens_to_process
                 seqlen_k = seqlen
@@ -288,10 +288,10 @@ class ModelRunner:
                 cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
                 max_seqlen_q = max(seqlen_q, max_seqlen_q)
                 max_seqlen_k = max(seqlen_k, max_seqlen_k)
-                
+
                 if not seq.block_table:
                     continue
-                
+
                 # 슬롯 매핑 계산 (KV 캐시에서의 위치)
                 seq_slot_mapping = []
                 for i in range(seq.num_blocks):
@@ -308,21 +308,22 @@ class ModelRunner:
                 if seq.stage != -1:
                     # 현재 단계에서 계산할 레이어들 결정
                     prefill_compute_layers.append(np.arange(self.num_layers).reshape(seq.num_stages, -1)[seq.stage].tolist())
-                    
+
                     # 이전 단계의 중간 출력 가져오기
                     i_hidden_states, i_residual = seq.intermediate_outputs if seq.intermediate_outputs else (None, None)
+                    seq.intermediate_outputs = None
                     if i_hidden_states is not None:
                         inter_hidden_states.append(i_hidden_states)
                     if i_residual is not None:
                         inter_residual.append(i_residual)
-                        
+
             elif seq.status == SequenceStatus.DECODING:
                 # DECODING 시퀀스 처리
                 decode_seqs.append(seq)
                 input_ids.append(seq.last_token)  # 마지막 토큰만 입력으로 사용
                 positions.append(len(seq))        # 현재 시퀀스 길이를 위치로 사용
                 context_lens.append(len(seq))     # 컨텍스트 길이
-                
+
                 # 마지막 블록의 마지막 슬롯 위치 계산
                 slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens - 1)
             else:
@@ -331,7 +332,7 @@ class ModelRunner:
         # PREFILLING 여부 확인
         is_prefill = len(prefill_seqs) > 0
         prefill_block_tables = None
-        
+
         # Chunked prefill인 경우 블록 테이블 준비
         if cu_seqlens_k[-1] > cu_seqlens_q[-1]:    # chunked prefill
             prefill_block_tables = self.prepare_block_tables(prefill_seqs)
@@ -345,7 +346,7 @@ class ModelRunner:
         cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        
+
         # 중간 출력들을 연결
         inter_hidden_states = torch.cat(inter_hidden_states, dim=0) if inter_hidden_states else None
         inter_residual = torch.cat(inter_residual, dim=0) if inter_residual else None
@@ -368,10 +369,10 @@ class ModelRunner:
     def prepare_sample(self, seqs: list[Sequence]):
         """
         샘플링을 위한 온도 파라미터 준비
-        
+
         Args:
             seqs: 시퀀스 리스트
-            
+
         Returns:
             온도 텐서
         """
@@ -385,12 +386,12 @@ class ModelRunner:
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, intermediate_outputs = None):
         """
         실제 모델 실행
-        
+
         Args:
             input_ids: 입력 토큰 ID들
             positions: 위치 정보
             intermediate_outputs: 중간 출력 (Staged-Prefill용)
-            
+
         Returns:
             tuple: (hidden_states, residual)
         """
@@ -408,23 +409,23 @@ class ModelRunner:
             # CUDA 그래프를 사용한 최적화된 실행
             bs = input_ids.size(0)
             context = get_context()
-            
+
             # 적절한 배치 크기의 그래프 선택
             graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
             graph_vars = self.graph_vars
-            
+
             # 그래프 변수 초기화 (출력 제외)
             for k, v in graph_vars.items():
                 if k != "outputs":
                     v.zero_()
-            
+
             # 그래프 변수에 현재 입력 설정
             graph_vars["input_ids"][:bs] = input_ids
             graph_vars["positions"][:bs] = positions
             graph_vars["slot_mapping"][:bs] = context.slot_mapping
             graph_vars["context_lens"][:bs] = context.context_lens
             graph_vars["block_tables"][:bs, :context.decode_block_tables.size(1)] = context.decode_block_tables
-            
+
             # 그래프 재실행
             graph.replay()
             return graph_vars["outputs"][:bs], None
@@ -432,27 +433,27 @@ class ModelRunner:
     def run(self, seqs: list[Sequence]) -> list[int]:
         """
         모델 실행의 메인 메서드
-        
+
         Args:
             seqs: 처리할 시퀀스 리스트
-            
+
         Returns:
             생성된 토큰 ID 리스트
         """
         # 입력 데이터 준비
         input_ids, positions, intermediate_outputs = self.prepare(seqs)
-        
+
         # 샘플링 파라미터 준비 (메인 프로세스에서만)
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
-        
+
         # 모델 실행
         hidden_states, residual = self.run_model(input_ids, positions, intermediate_outputs)
-        
+
         # Staged-Prefill에서 중간 출력 저장
         start_idx = 0
         for seq in seqs:
             end_idx = start_idx + seq.num_tokens_to_process
-            
+
             # Staged-Prefill 모드에서 중간 출력 저장
             if seq.stage != -1:
                 # 현재 시퀀스에 해당하는 중간 출력 추출
@@ -464,18 +465,18 @@ class ModelRunner:
                     i_residual = residual[start_idx:end_idx]
                 # 시퀀스에 중간 출력 저장 (다음 단계에서 재사용)
                 seq.intermediate_outputs = (i_hidden_states, i_residual)
-            
+
             # 마지막 단계 완료 후 중간 출력 삭제 (메모리 절약)
             if seq.stage == seq.num_stages:
                 seq.intermediate_outputs = None
-                
+
             start_idx = end_idx
-        
+
         # 로짓 계산 및 토큰 샘플링
         with torch.inference_mode():
             logits = self.model.compute_logits(hidden_states)
         token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
-        
+
         # 컨텍스트 정리
         reset_context()
         return token_ids
@@ -488,11 +489,11 @@ class ModelRunner:
         """
         config = self.config
         hf_config = config.hf_config
-        
+
         # 최대 배치 크기 설정
         max_bs = min(self.config.max_num_seqs, 512)
         max_num_blocks = (config.max_model_len + self.block_size - 1) // self.block_size
-        
+
         # 그래프 캡처용 더미 텐서들 생성
         input_ids = torch.zeros(max_bs, dtype=torch.int64)
         positions = torch.zeros(max_bs, dtype=torch.int64)
@@ -500,7 +501,7 @@ class ModelRunner:
         context_lens = torch.zeros(max_bs, dtype=torch.int32)
         block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
         outputs = torch.zeros(max_bs, hf_config.hidden_size)
-        
+
         # 캡처할 배치 크기들 정의
         self.graph_bs = list(range(1, 32)) + list(range(32, max_bs + 1, 8))
         self.graphs = {}
@@ -509,21 +510,21 @@ class ModelRunner:
         # 각 배치 크기에 대해 그래프 캡처
         for bs in reversed(self.graph_bs):
             graph = torch.cuda.CUDAGraph()
-            
+
             # 컨텍스트 설정 (DECODING 모드)
             set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], decode_block_tables=block_tables[:bs])
-            
+
             # 워밍업 실행
             outputs[:bs] = self.model(input_ids[:bs], positions[:bs])[0]
-            
+
             # 그래프 캡처
             with torch.cuda.graph(graph, self.graph_pool):
                 outputs[:bs] = self.model(input_ids[:bs], positions[:bs])[0]
-            
+
             # 첫 번째 그래프의 풀을 다른 그래프들과 공유
             if self.graph_pool is None:
                 self.graph_pool = graph.pool()
-            
+
             self.graphs[bs] = graph
             torch.cuda.synchronize()
             reset_context()
