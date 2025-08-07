@@ -538,3 +538,7 @@ class ModelRunner:
             block_tables=block_tables,
             outputs=outputs,
         )
+
+        if hasattr(self.model, "capture_cudagraph"):
+            # 모델이 CUDA 그래프 캡처를 지원하는 경우 추가 캡처
+            self.model.capture_cudagraph(max_bs=max_bs, max_num_blocks=max_num_blocks, num_stages=config.num_stages)
