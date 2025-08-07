@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import time
+import datetime
 import traceback
 from dataclasses import dataclass, field
 from typing import Optional, Union
@@ -47,6 +48,7 @@ class RequestFuncOutput:
     tpot: float = 0.0  # avg next-token latencies
     prompt_len: int = 0
     error: str = ""
+    request_dt: datetime.datetime = field(default_factory=datetime.datetime.now)
 
 
 async def async_request_tgi(
