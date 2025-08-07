@@ -390,16 +390,255 @@ class ShareGPTDataset(BenchmarkDataset):
         self.load_data()
 
     def load_data(self) -> None:
-        if self.dataset_path is None:
-            raise ValueError("dataset_path must be provided for loading data.")
+        import os
+        self.data = pd.read_csv(os.path.join(os.path.dirname(__file__), "preprocessed_traces/sharegpt_8k_filtered_stats_llama2_tokenizer.csv"))
+        self.data = [self.data.iloc[i] for i in range(len(self.data)) if self.data.iloc[i]["num_prefill_tokens"] > 0 and self.data.iloc[i]["num_decode_tokens"] > 0]
+        random.seed(self.random_seed)
+        random.shuffle(self.data)
 
-        with open(self.dataset_path, encoding="utf-8") as f:
-            self.data = json.load(f)
-        # Filter entries with at least two conversation turns.
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        **kwargs,
+    ) -> list:
+        vocab_size = tokenizer.vocab_size
+        num_special_tokens = tokenizer.num_special_tokens_to_add()
+
+        prefix_token_ids = []
+
+        offsets = np.random.randint(0, vocab_size, size=num_requests)
+
+        requests = []
+        for i in range(num_requests):
+            input_len = self.data[i]["num_prefill_tokens"]
+            output_len = self.data[i]["num_decode_tokens"]
+            real_input_len = int(input_len - num_special_tokens)
+            inner_seq = (
+                (offsets[i] + i + np.arange(real_input_len)) % vocab_size
+            ).tolist()
+            token_sequence = prefix_token_ids + inner_seq
+            prompt = tokenizer.decode(token_sequence)
+            # After decoding the prompt we have to encode and decode it again.
+            # This is done because in some cases N consecutive tokens
+            # give a string tokenized into != N number of tokens.
+            # For example for GPT2Tokenizer:
+            # [6880, 6881] -> ['Ġcalls', 'here'] ->
+            # [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
+            # To avoid uncontrolled change of the prompt length,
+            # the encoded sequence is truncated before being decode again.
+            total_input_len = int(real_input_len)
+
+            re_encoded_sequence = tokenizer.encode(prompt, add_special_tokens=False)[
+                :total_input_len
+            ]
+            prompt = tokenizer.decode(re_encoded_sequence)
+            total_input_len = len(re_encoded_sequence)
+            requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=total_input_len,
+                    expected_output_len=output_len,
+                )
+            )
+        return requests
+
+
+
+
+# -----------------------------------------------------------------------------
+# Arxiv Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class ArxivDataset(BenchmarkDataset):
+    """
+    Implements the arxiv dataset.  Loads data from a JSON file and generates
+    sample requests based on conversation turns.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.load_data()
+
+    def load_data(self) -> None:
+        import os
+        self.data = pd.read_csv(os.path.join(os.path.dirname(__file__), "preprocessed_traces/arxiv_summarization_filtered_stats_llama2_tokenizer.csv"))
+        self.data = [self.data.iloc[i] for i in range(len(self.data)) if self.data.iloc[i]["num_prefill_tokens"] > 0 and self.data.iloc[i]["num_decode_tokens"] > 0]
+        random.seed(self.random_seed)
+        random.shuffle(self.data)
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        **kwargs,
+    ) -> list:
+        vocab_size = tokenizer.vocab_size
+        num_special_tokens = tokenizer.num_special_tokens_to_add()
+
+        prefix_token_ids = []
+
+        offsets = np.random.randint(0, vocab_size, size=num_requests)
+
+        requests = []
+        for i in range(num_requests):
+            input_len = self.data[i]["num_prefill_tokens"]
+            output_len = self.data[i]["num_decode_tokens"]
+            real_input_len = int(input_len - num_special_tokens)
+            inner_seq = (
+                (offsets[i] + i + np.arange(real_input_len)) % vocab_size
+            ).tolist()
+            token_sequence = prefix_token_ids + inner_seq
+            prompt = tokenizer.decode(token_sequence)
+            # After decoding the prompt we have to encode and decode it again.
+            # This is done because in some cases N consecutive tokens
+            # give a string tokenized into != N number of tokens.
+            # For example for GPT2Tokenizer:
+            # [6880, 6881] -> ['Ġcalls', 'here'] ->
+            # [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
+            # To avoid uncontrolled change of the prompt length,
+            # the encoded sequence is truncated before being decode again.
+            total_input_len = int(real_input_len)
+
+            re_encoded_sequence = tokenizer.encode(prompt, add_special_tokens=False)[
+                :total_input_len
+            ]
+            prompt = tokenizer.decode(re_encoded_sequence)
+            total_input_len = len(re_encoded_sequence)
+            requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=total_input_len,
+                    expected_output_len=output_len,
+                )
+            )
+        return requests
+
+
+# -----------------------------------------------------------------------------
+# LongBench Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class LongBenchDataset(BenchmarkDataset):
+    """
+    Implements the ShareGPT dataset.  Loads data from a JSON file and generates
+    sample requests based on conversation turns.
+    """
+
+    # DATAS =
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.load_data()
+
+    def load_data(self) -> None:
+        if self.dataset_path is None:
+            from datasets import load_dataset, concatenate_datasets
+            datasets = ["qasper", "multifieldqa_en", "hotpotqa", "2wikimqa", "gov_report", "multi_news", "trec", \
+                        "triviaqa", "samsum", "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
+
+            datas = []
+            for dataset in datasets:
+                data = load_dataset('THUDM/LongBench', f"{dataset}_e", split='test')
+                datas.append(data)
+            self.data = concatenate_datasets(datas)
+        else:
+            with open(self.dataset_path, encoding="utf-8") as f:
+                self.data = json.load(f)
+
         self.data = [
-            entry
+            (entry["context"], entry["input"])
             for entry in self.data
-            if "conversations" in entry and len(entry["conversations"]) >= 2
+        ]
+        random.seed(self.random_seed)
+        random.shuffle(self.data)
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        lora_path: Optional[str] = None,
+        max_loras: Optional[int] = None,
+        output_len: Optional[int] = None,
+        enable_multimodal_chat: bool = False,
+        **kwargs,
+    ) -> list:
+        samples: list = []
+
+        for entry in self.data:
+            if len(samples) >= num_requests:
+                break
+            context, input = (
+                entry[0],
+                entry[1]
+            )
+
+            lora_request, tokenizer = self.get_random_lora_request(
+                tokenizer=tokenizer, max_loras=max_loras, lora_path=lora_path
+            )
+            messages = [
+                {"role": "user", "content": context},
+                {"role": "user", "content": input},
+            ]
+
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                # tokenizer_kwargs={"add_special_tokens": False},
+            )
+
+            prompt_ids = tokenizer(prompt).input_ids
+            prompt_len = len(prompt_ids)
+
+            new_output_len = output_len
+            if enable_multimodal_chat:
+                prompt = self.apply_multimodal_chat_transformation(prompt, None)
+            samples.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=new_output_len,
+                    lora_request=lora_request,
+                )
+            )
+        self.maybe_oversample_requests(samples, num_requests)
+        return samples
+
+
+
+# -----------------------------------------------------------------------------
+# LongBenchV2 Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class LongBenchV2Dataset(BenchmarkDataset):
+    """
+    Implements the ShareGPT dataset.  Loads data from a JSON file and generates
+    sample requests based on conversation turns.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.load_data()
+
+    def load_data(self) -> None:
+        if self.dataset_path is None:
+            import datasets
+            self.data = datasets.load_dataset(
+                "THUDM/LongBench-v2",
+                split="train",
+            )
+        else:
+            with open(self.dataset_path, encoding="utf-8") as f:
+                self.data = json.load(f)
+
+        import pdb; pdb.set_trace()
+        self.data = [
+            (entry["context"], entry["question"])
+            for entry in self.data
         ]
         random.seed(self.random_seed)
         random.shuffle(self.data)
@@ -418,24 +657,30 @@ class ShareGPTDataset(BenchmarkDataset):
         for entry in self.data:
             if len(samples) >= num_requests:
                 break
-            prompt, completion = (
-                entry["conversations"][0]["value"],
-                entry["conversations"][1]["value"],
+            context, question = (
+                entry[0],
+                entry[1]
             )
 
             lora_request, tokenizer = self.get_random_lora_request(
                 tokenizer=tokenizer, max_loras=max_loras, lora_path=lora_path
             )
+
+            messages = [
+                {"role": "user", "content": context},
+                {"role": "user", "content": question},
+            ]
+
+            # Apply chat template to the prompt
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+
             prompt_ids = tokenizer(prompt).input_ids
-            completion_ids = tokenizer(completion).input_ids
             prompt_len = len(prompt_ids)
-            new_output_len = len(completion_ids) if output_len is None else output_len
-            if not is_valid_sequence(
-                prompt_len,
-                new_output_len,
-                skip_min_output_len_check=output_len is not None,
-            ):
-                continue
+            new_output_len = output_len
             if enable_multimodal_chat:
                 prompt = self.apply_multimodal_chat_transformation(prompt, None)
             samples.append(
