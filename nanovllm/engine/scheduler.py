@@ -49,11 +49,13 @@ class Scheduler:
         prefill_scheduled_seqs = []
         decode_scheduled_seqs = []
         num_batched_tokens = 0
+        num_seqs = 0
 
         # decode
         while (
             self.decoding
             and num_batched_tokens < self.max_num_batched_tokens
+            and num_seqs < self.max_num_seqs
         ):
             seq = self.decoding.popleft()
             while not self.block_manager.can_append(seq):
@@ -66,7 +68,12 @@ class Scheduler:
                 num_batched_tokens += 1
                 self.block_manager.may_append(seq)
                 decode_scheduled_seqs.append(seq)
+<<<<<<< Updated upstream
         
+=======
+                num_seqs += 1
+
+>>>>>>> Stashed changes
         # prefill
         while (
             self.prefilling

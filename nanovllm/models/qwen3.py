@@ -2,6 +2,7 @@ import torch
 from torch import nn
 import torch.distributed as dist
 from transformers import Qwen3Config
+import numpy as np
 
 from nanovllm.layers.activation import SiluAndMul
 from nanovllm.layers.attention import Attention
@@ -9,7 +10,7 @@ from nanovllm.layers.layernorm import RMSNorm
 from nanovllm.layers.linear import QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear
 from nanovllm.layers.rotary_embedding import get_rope
 from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
-from nanovllm.utils.context import get_context
+from nanovllm.utils.context import get_context, set_context, reset_context
 
 
 class Qwen3Attention(nn.Module):
@@ -305,6 +306,8 @@ class Qwen3Model(nn.Module):
         # 최종 정규화
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+        self.num_stages = -1
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -349,86 +352,122 @@ class Qwen3Model(nn.Module):
                 for layer_idx in prefill_compute_layer:
                     prefill_compute_layer_map[layer_idx] = idx
 
+            if self.num_stages == -1:
+                slayers = [self.layers]
+                layers_per_stage = len(self.layers)
+            else:
+                # 단계별로 레이어를 나누기
+                slayers = np.array_split(self.layers, self.num_stages)
+                layers_per_stage = len(slayers[0])
+
             # 각 레이어를 단계별로 처리
-            for layer_idx, layer in enumerate(self.layers):
-                if layer_idx in prefill_compute_layer_map:
-                    # 현재 단계에서 계산할 레이어
-                    idx = prefill_compute_layer_map[layer_idx]
-                    start_idx = context.cu_seqlens_q[idx]
-                    end_idx = context.cu_seqlens_q[idx + 1]
+            for stage_idx, layers in enumerate(slayers):
+                if self.num_stages == -1 or stage_idx * layers_per_stage in prefill_compute_layer_map:
+                    for layer_idx, layer in enumerate(layers):
+                        layer_idx += layers_per_stage * stage_idx
+                        # 현재 단계에서 계산할 레이어
+                        idx = prefill_compute_layer_map[layer_idx]
 
-                    # 처리할 인덱스 계산 (현재 단계 + 디코딩 부분)
-                    indices = torch.cat([
-                        torch.arange(start_idx, end_idx, device=hidden_states.device),
-                        torch.arange(len_staged_prefill, hidden_states.size(0), device=hidden_states.device)
-                    ])
+                        if prefill_compute_layer_map.get(layer_idx - 1, -1) != idx:
+                            start_idx = context.cu_seqlens_q[idx]
+                            end_idx = context.cu_seqlens_q[idx + 1]
 
-                    # 컨텍스트 정보 백업 및 수정
-                    max_seqlen_k = context.max_seqlen_k
-                    max_seqlen_q = context.max_seqlen_q
-                    context.max_seqlen_k = int(context.cu_seqlens_k[idx + 1] - context.cu_seqlens_k[idx])
-                    context.max_seqlen_q = int(context.cu_seqlens_q[idx + 1] - context.cu_seqlens_q[idx])
+                            # 처리할 인덱스 계산 (현재 단계 + 디코딩 부분)
+                            indices = torch.cat([
+                                torch.arange(start_idx, end_idx, device=hidden_states.device),
+                                torch.arange(len_staged_prefill, hidden_states.size(0), device=hidden_states.device)
+                            ])
 
-                    # 시퀀스 길이 정보 수정
-                    cu_seqlens_k = context.cu_seqlens_k.clone()
-                    cu_seqlens_q = context.cu_seqlens_q.clone()
-                    context.cu_seqlens_k = cu_seqlens_k[idx:idx + 2] - cu_seqlens_k[idx]
-                    context.cu_seqlens_q = cu_seqlens_q[idx:idx + 2] - cu_seqlens_q[idx]
+                            # 컨텍스트 정보 백업 및 수정
+                            max_seqlen_k = context.max_seqlen_k
+                            max_seqlen_q = context.max_seqlen_q
+                            context.max_seqlen_k = int(context.cu_seqlens_k[idx + 1] - context.cu_seqlens_k[idx])
+                            context.max_seqlen_q = int(context.cu_seqlens_q[idx + 1] - context.cu_seqlens_q[idx])
 
-                    # 블록 테이블 및 슬롯 매핑 수정
-                    prefill_block_tables = None
-                    if context.prefill_block_tables is not None:
-                        prefill_block_tables = context.prefill_block_tables.clone()
-                        context.prefill_block_tables = prefill_block_tables[start_idx:end_idx]
+                            # 시퀀스 길이 정보 수정
+                            cu_seqlens_k = context.cu_seqlens_k.clone()
+                            cu_seqlens_q = context.cu_seqlens_q.clone()
+                            context.cu_seqlens_k = cu_seqlens_k[idx:idx + 2] - cu_seqlens_k[idx]
+                            context.cu_seqlens_q = cu_seqlens_q[idx:idx + 2] - cu_seqlens_q[idx]
 
-                    slot_mapping = None
-                    if context.slot_mapping is not None:
-                        slot_mapping = context.slot_mapping.clone()
-                        context.slot_mapping = context.slot_mapping[indices]
+                            # 블록 테이블 및 슬롯 매핑 수정
+                            prefill_block_tables = None
+                            if context.prefill_block_tables is not None:
+                                prefill_block_tables = context.prefill_block_tables.clone()
+                                context.prefill_block_tables = prefill_block_tables[start_idx:end_idx]
 
-                    # 레이어 실행
-                    if layer_idx == 0:
-                        _hidden_states, _residual = layer(positions[indices], hidden_states[indices], None)
-                    else:
-                        _hidden_states, _residual = layer(positions[indices], hidden_states[indices], residual[indices])
-                    hidden_states[indices] = _hidden_states
-                    residual[indices] = _residual
+                            slot_mapping = None
+                            if context.slot_mapping is not None:
+                                slot_mapping = context.slot_mapping.clone()
+                                context.slot_mapping = context.slot_mapping[indices]
 
-                    # 컨텍스트 정보 복원
-                    context.max_seqlen_k = max_seqlen_k
-                    context.max_seqlen_q = max_seqlen_q
-                    context.cu_seqlens_k = cu_seqlens_k
-                    context.cu_seqlens_q = cu_seqlens_q
-                    context.prefill_block_tables = prefill_block_tables
-                    context.slot_mapping = slot_mapping
+                            _positions = positions[indices]
+                            _hidden_states = hidden_states[indices]
+                            _residual = residual[indices] if layer_idx > 0 else None
+                        # 레이어 실행
+                        _hidden_states, _residual = layer(_positions, _hidden_states, _residual)
+
+                        if prefill_compute_layer_map.get(layer_idx + 1, -1) != idx:
+                            hidden_states[indices] = _hidden_states
+                            residual[indices] = _residual
+
+                            # 컨텍스트 정보 복원
+                            context.max_seqlen_k = max_seqlen_k
+                            context.max_seqlen_q = max_seqlen_q
+                            context.cu_seqlens_k = cu_seqlens_k
+                            context.cu_seqlens_q = cu_seqlens_q
+                            context.prefill_block_tables = prefill_block_tables
+                            context.slot_mapping = slot_mapping
                 else:
-                    # 현재 단계에서 계산하지 않는 레이어 (디코딩 부분만 처리)
-                    if hidden_states[len_staged_prefill:].size(0) > 0:
-                        # PREFILLING 모드를 일시적으로 비활성화
-                        is_prefill = context.is_prefill
-                        context.is_prefill = False
+                    bs = hidden_states[len_staged_prefill:].size(0)
+                    if bs > 0:
+                        if (stage_idx, bs) in self.graphs:
+                            # CUDA 그래프가 있는 경우
+                            graph = self.graphs[(stage_idx, bs)]
+                            graph_vars = self.graph_vars
 
-                        # 슬롯 매핑 수정
-                        slot_mapping = None
-                        if context.slot_mapping is not None:
-                            slot_mapping = context.slot_mapping.clone()
-                            context.slot_mapping = slot_mapping[len_staged_prefill:]
+                            for k, v in graph_vars.items():
+                                if not k.startswith("outputs_"):
+                                    v.zero_()
 
-                        # 디코딩 부분만 레이어 실행
-                        if layer_idx == 0:
-                            _hidden_states, _residual = layer(positions[len_staged_prefill:], hidden_states[len_staged_prefill:], None)
+                            graph_vars["hidden_states"][:bs] = hidden_states[len_staged_prefill:]
+                            graph_vars["residual"][:bs] = residual[len_staged_prefill:]
+                            graph_vars["positions"][:bs] = positions[len_staged_prefill:]
+                            graph_vars["slot_mapping"][:bs] = context.slot_mapping[len_staged_prefill:]
+                            graph_vars["context_lens"][:bs] = context.context_lens
+                            graph_vars["block_tables"][:bs, :context.decode_block_tables.size(1)] = context.decode_block_tables
+
+                            graph.replay()
+
+                            hidden_states[len_staged_prefill:] = graph_vars["outputs_hidden_states"][:bs]
+                            residual[len_staged_prefill:] = graph_vars["outputs_residual"][:bs]
                         else:
-                            _hidden_states, _residual = layer(
-                                positions[len_staged_prefill:],
-                                hidden_states[len_staged_prefill:],
-                                residual[len_staged_prefill:]
-                            )
-                        hidden_states[len_staged_prefill:] = _hidden_states
-                        residual[len_staged_prefill:] = _residual
+                            for layer_idx, layer in enumerate(layers):
+                                # PREFILLING 모드를 일시적으로 비활성화
+                                is_prefill = context.is_prefill
+                                context.is_prefill = False
 
-                        # 컨텍스트 복원
-                        context.is_prefill = is_prefill
-                        context.slot_mapping = slot_mapping
+                                # 슬롯 매핑 수정
+                                slot_mapping = None
+                                if context.slot_mapping is not None:
+                                    slot_mapping = context.slot_mapping.clone()
+                                    context.slot_mapping = slot_mapping[len_staged_prefill:]
+
+                                # 디코딩 부분만 레이어 실행
+                                if layer_idx == 0:
+                                    _hidden_states, _residual = layer(positions[len_staged_prefill:], hidden_states[len_staged_prefill:], None)
+                                else:
+                                    _hidden_states, _residual = layer(
+                                        positions[len_staged_prefill:],
+                                        hidden_states[len_staged_prefill:],
+                                        residual[len_staged_prefill:]
+                                    )
+                                hidden_states[len_staged_prefill:] = _hidden_states
+                                residual[len_staged_prefill:] = _residual
+
+                                # 컨텍스트 복원
+                                context.is_prefill = is_prefill
+                                context.slot_mapping = slot_mapping
 
             # 최종 정규화 처리
             if len(self.layers) - 1 in prefill_compute_layer_map:
@@ -461,6 +500,91 @@ class Qwen3Model(nn.Module):
             hidden_states, residual = self.norm(hidden_states, residual)
 
         return hidden_states, residual
+
+    def capture_cudagraph(self, max_bs: int = 1, max_num_blocks: int = 1, num_stages: int = 1):
+        """
+        CUDA 그래프 캡처
+
+        Staged-Prefill 모드에서 CUDA 그래프를 캡처합니다.
+        """
+
+        self.num_stages = num_stages
+
+        hidden_size = self.embed_tokens.weight.size(1)
+
+        hidden_states = torch.zeros(max_bs, hidden_size)
+        residual = torch.zeros(max_bs, hidden_size)
+        positions = torch.zeros(max_bs, dtype=torch.int64)
+        slot_mapping = torch.zeros(max_bs, dtype=torch.int32)
+        context_lens = torch.zeros(max_bs, dtype=torch.int32)
+        block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
+        outputs_hidden_states = torch.zeros(max_bs, hidden_size)
+        outputs_residual = torch.zeros(max_bs, hidden_size)
+
+        self.graph_bs = list(range(1, 32)) + list(range(32, max_bs + 1, 8))
+        self.graphs = {}
+        self.graph_pool = None
+
+        for bs in reversed(self.graph_bs):
+            set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], decode_block_tables=block_tables[:bs])
+
+            for ith_stage in range(num_stages):
+                graph = torch.cuda.CUDAGraph()
+
+                # 워밍업 실행
+                _positions = positions[:bs].clone()
+                _hidden_states = hidden_states[:bs].clone()
+                _residual = residual[:bs].clone()
+                for layer_idx in np.arange(len(self.layers)).reshape(num_stages, -1)[ith_stage]:
+                    layer = self.layers[layer_idx]
+                    if layer_idx == 0:
+                        # 첫 번째 단계에서는 입력을 받음
+                        _hidden_states, _residual = layer(_positions, _hidden_states, None)
+                    else:
+                        # 이후 단계에서는 이전 단계의 출력과 잔차를 사용
+                        _hidden_states, _residual = layer(_positions, _hidden_states, _residual)
+
+                outputs_hidden_states[:bs] = _hidden_states
+                outputs_residual[:bs] = _residual
+
+                # 그래프 캡쳐
+                with torch.cuda.graph(graph, self.graph_pool):
+                    _positions = positions[:bs].clone()
+                    _hidden_states = hidden_states[:bs].clone()
+                    _residual = residual[:bs].clone()
+                    for layer_idx in np.arange(len(self.layers)).reshape(num_stages, -1)[ith_stage]:
+                        layer = self.layers[layer_idx]
+                        if layer_idx == 0:
+                            # 첫 번째 단계에서는 입력을 받음
+                            _hidden_states, _residual = layer(_positions, _hidden_states, None)
+                        else:
+                            # 이후 단계에서는 이전 단계의 출력과 잔차를 사용
+                            _hidden_states, _residual = layer(_positions, _hidden_states, _residual)
+
+                    outputs_hidden_states[:bs] = _hidden_states
+                    outputs_residual[:bs] = _residual
+
+                # 그래프 저장
+                if self.graph_pool is None:
+                    self.graph_pool = graph.pool()
+
+                self.graphs[(ith_stage, bs)] = graph
+                torch.cuda.synchronize()
+
+            reset_context()
+
+        self.graph_vars = dict(
+            hidden_states=hidden_states,
+            residual=residual,
+            positions=positions,
+            slot_mapping=slot_mapping,
+            context_lens=context_lens,
+            block_tables=block_tables,
+            outputs_hidden_states=outputs_hidden_states,
+            outputs_residual=outputs_residual,
+        )
+
+        print(f"Captured {len(self.graphs)} CUDA graphs for Staged-Prefill mode with {num_stages} stages.")
 
 
 class Qwen3ForCausalLM(nn.Module):
@@ -535,3 +659,11 @@ class Qwen3ForCausalLM(nn.Module):
         """
         logits = self.lm_head(hidden_states)
         return logits
+
+    def capture_cudagraph(self, max_bs: int = 1, max_num_blocks: int = 1, num_stages: int = 1):
+        """
+        CUDA 그래프 캡처
+
+        Staged-Prefill 모드에서 CUDA 그래프를 캡처합니다.
+        """
+        self.model.capture_cudagraph(max_bs, max_num_blocks, num_stages)
