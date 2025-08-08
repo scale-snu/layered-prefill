@@ -79,12 +79,11 @@ if __name__ == "__main__":
         "host": ["localhost"],
         "port": [8001],
         "nccl_port": [2334],
-        # "schedule_mode": ["staged-prefill", "chunked-prefill"],
-        "schedule_mode": ["chunked-prefill"],
+        "schedule_mode": ["staged-prefill", "chunked-prefill"],
         "num_stages": [1, 2, 4, 8, 16],
     }
     request_configs = {
-        "datasets": [("random", 1024, 128), ("random", 16384, 128), ("sharegpt", -1, 8192), ("longbench", -1, 8192)],
+        "datasets": [("random", 1024, 128), ("random", 16384, 128), ("sharegpt", -1, None), ("longbench", -1, 8192)],
         "request_rate": [0.1, 0.125, 0.15, 0.175, 0.2, 0.225, 0.25, 0.275, 0.3, 1, 1.2, 1.3, 1.5, 1.7, 1.8, 2, 2.5, 3, 3.5, 4, 4.5, 5],
         "num_requests": [300],
     }
@@ -146,32 +145,39 @@ if __name__ == "__main__":
                 if request_rate >= 1:
                     continue
                 pass
+            elif dataset_name == "sharegpt":
+                if request_rate < 1:
+                    continue
+            else:
+                raise ValueError(f"Unknown dataset: {dataset_name}")
 
             num_requests = min(num_requests, int(MAX_TIME / (1 / request_rate)))
             print(f"Running benchmark with request config: {input_length}, {output_length}, {request_rate}, {num_requests}")
 
-            log_filename = f"logs/benchmark_{model.split('/')[-4]}_{max_num_batched_tokens}_{max_num_seqs}_{max_model_len}_{gpu_memory_utilization}_{tensor_parallel_size}_{enforce_eager}_{log_level}_{host}_{port}_{nccl_port}_{schedule_mode}_{num_stages}_{input_length}_{output_length}_{request_rate}_{num_requests}.log"
+            log_filename = f"logs/benchmark_{model.split('/')[-4]}_{max_num_batched_tokens}_{max_num_seqs}_{max_model_len}_{gpu_memory_utilization}_{tensor_parallel_size}_{enforce_eager}_{log_level}_{host}_{port}_{nccl_port}_{schedule_mode}_{num_stages}_{dataset_name}_{input_length}_{output_length}_{request_rate}_{num_requests}.log"
             json_filename = log_filename.replace(".log", ".json")
 
-            os.makedirs(os.path.dirname(log_filename), exist_ok=True)
+            os.makedirs(os.path.dirname(json_filename), exist_ok=True)
 
-            if os.path.exists(log_filename):
-                print(f"Log file {log_filename} already exists. Skipping this configuration.")
+            if os.path.exists(json_filename):
+                print(f"Log file {json_filename} already exists. Skipping this configuration.")
                 continue
 
             warmup_num_requests = min(num_requests, int(WARMUP_TIME / (1 / request_rate)))
             print(f"Running warmup with request config: {input_length}, {output_length}, {request_rate}, {warmup_num_requests}")
 
             if dataset_name == "random":
-                dataset_flag = f"--dataset random --random-input-len {input_length} --random-output-len {output_length} --ignore-eos"
+                dataset_flag = f"--dataset-name random --random-input-len {input_length} --random-output-len {output_length} --ignore-eos"
             elif dataset_name == "sharegpt":
-                dataset_flag = f"--dataset {dataset_name} --sharegpt-output-len {output_length}"
+                dataset_flag = f"--dataset-name {dataset_name}"
+                if output_length is not None:
+                    dataset_flag += f" --sharegpt-output-len {output_length}"
             elif dataset_name == "longbench":
-                dataset_flag = f"--dataset {dataset_name} --longbench-output-len {output_length}"
+                dataset_flag = f"--dataset-name {dataset_name} --longbench-output-len {output_length}"
             else:
                 raise ValueError(f"Unknown dataset: {dataset_name}")
 
-            warmup_command = f"python benchmarks/benchmark_serving.py --model {model} --endpoint /generate --request-rate {request_rate} --percentile-metrics 'ttft,tpot,itl,e2el' --metric-percentiles '50,90,95,99' --goodput 'ttft:200' 'tpot:20' 'e2el:20000' --num-prompts {warmup_num_requests}  {dataset_flag} --port {port} --backend nano-vllm > /dev/null 2>&1"
+            warmup_command = f"python benchmarks/benchmark_serving.py --model {model} --endpoint /generate --request-rate {request_rate} --percentile-metrics 'ttft,tpot,itl,e2el' --metric-percentiles '50,90,95,99' --goodput 'ttft:200' 'tpot:20' 'e2el:20000' --num-prompts {warmup_num_requests} {dataset_flag} --port {port} --backend nano-vllm > /dev/null 2>&1"
             warmup_process = run_command(warmup_command)
 
             # Wait for the warmup to finish
@@ -180,13 +186,13 @@ if __name__ == "__main__":
             print(f"Warmup completed with return code: {warmup_process.returncode}")
 
             # Run the benchmark command
-            benchmark_command = f"python benchmarks/benchmark_serving.py --model {model} --endpoint /generate --dataset-name random --request-rate {request_rate} --percentile-metrics 'ttft,tpot,itl,e2el' --metric-percentiles '50,90,95,99' --goodput 'ttft:200' 'tpot:20' 'e2el:20000' --num-prompts {num_requests} --random-input-len {input_length} --random-output-len {output_length} --port {port} --backend nano-vllm --save-result --save-detailed --result-filename {json_filename} > {log_filename} 2>&1"
+            benchmark_command = f"python benchmarks/benchmark_serving.py --model {model} --endpoint /generate --request-rate {request_rate} --percentile-metrics 'ttft,tpot,itl,e2el' --metric-percentiles '50,90,95,99' --goodput 'ttft:200' 'tpot:20' 'e2el:20000' --num-prompts {num_requests} {dataset_flag} --port {port} --backend nano-vllm --save-result --save-detailed --result-filename {json_filename} > {log_filename} 2>&1"
             benchmark_process = run_command(benchmark_command)
 
             # Wait for the benchmark to finish
             benchmark_process.wait()
 
-            print(f"Benchmark ({input_length}, {output_length}, {request_rate}, {num_requests}) completed with return code: {benchmark_process.returncode}")
+            print(f"Benchmark ({dataset_name}, {input_length}, {output_length}, {request_rate}, {num_requests}) completed with return code: {benchmark_process.returncode}")
 
         # Terminate the server process
         while not check_gpu_memory(GPU_ID):

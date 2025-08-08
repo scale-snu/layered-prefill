@@ -20,7 +20,7 @@ from nanovllm.engine.scheduler import Scheduler
 from nanovllm.engine.model_runner import ModelRunner
 from nanovllm.config import Config
 
-ENGINE_ITERATION_TIMEOUT_S = 600
+ENGINE_ITERATION_TIMEOUT_S = 600000
 
 
 class AsyncStream:
