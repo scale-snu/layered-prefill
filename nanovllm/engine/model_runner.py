@@ -411,7 +411,10 @@ class ModelRunner:
             context = get_context()
 
             # 적절한 배치 크기의 그래프 선택
-            graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
+            try:
+                graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
+            except StopIteration:
+                raise ValueError(f"No suitable CUDA graph found for batch size {bs}. Available sizes: {self.graph_bs}")
             graph_vars = self.graph_vars
 
             # 그래프 변수 초기화 (출력 제외)
@@ -539,6 +542,6 @@ class ModelRunner:
             outputs=outputs,
         )
 
-        if hasattr(self.model, "capture_cudagraph"):
+        if hasattr(self.model, "capture_cudagraph") and config.schedule_mode == "staged_prefill":
             # 모델이 CUDA 그래프 캡처를 지원하는 경우 추가 캡처
             self.model.capture_cudagraph(max_bs=max_bs, max_num_blocks=max_num_blocks, num_stages=config.num_stages)
