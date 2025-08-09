@@ -391,15 +391,226 @@ class ShareGPTDataset(BenchmarkDataset):
 
     def load_data(self) -> None:
         if self.dataset_path is None:
-            raise ValueError("dataset_path must be provided for loading data.")
-
-        with open(self.dataset_path, encoding="utf-8") as f:
-            self.data = json.load(f)
+            import datasets
+            self.data = datasets.load_dataset(
+                "Aeala/ShareGPT_Vicuna_unfiltered",
+                data_files={
+                    "valid": "ShareGPT_V4.3_unfiltered_cleaned_split.json",
+                },
+                split="valid",
+            )
+        else:
+            with open(self.dataset_path, encoding="utf-8") as f:
+                self.data = json.load(f)
         # Filter entries with at least two conversation turns.
         self.data = [
-            entry
+            entry["conversations"]
             for entry in self.data
             if "conversations" in entry and len(entry["conversations"]) >= 2
+        ]
+        random.seed(self.random_seed)
+        random.shuffle(self.data)
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        lora_path: Optional[str] = None,
+        max_loras: Optional[int] = None,
+        output_len: Optional[int] = None,
+        enable_multimodal_chat: bool = False,
+        **kwargs,
+    ) -> list:
+        samples: list = []
+        value_key = "value" if "value" in self.data[0][0] else "content"
+        for entry in self.data:
+            if len(samples) >= num_requests:
+                break
+            convroles=["user","assistant"]
+            roles = {"human": "user", "gpt": "assistant"}
+
+            def get_role(s):
+                if "from" in s:
+                    return roles[s["from"]]
+                else:
+                    return s["role"]
+
+            if get_role(entry[0]) != "user":
+                # Skip the first one if it is not from human
+                entry = entry[1:]
+
+            messages = []
+            for j, sentence in enumerate(entry):
+                role = get_role(sentence)
+
+                assert role == convroles[j % 2]
+
+                if role == "assistant":
+                    sentence[value_key] = " " + sentence[value_key]
+
+                messages.append(
+                    {"role": role, "content": sentence[value_key]}
+                )
+
+            messages = [
+                {
+                    "role": m["role"],
+                    "content": m["content"],
+                }
+                for m in messages
+            ]
+            lora_request, tokenizer = self.get_random_lora_request(
+                tokenizer=tokenizer, max_loras=max_loras, lora_path=lora_path
+            )
+
+            # Apply chat template to the prompt
+            prompt = tokenizer.apply_chat_template(
+                messages[:-1],  # Exclude the last message for generation
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            completion = messages[-1]["content"]
+
+            prompt_ids = tokenizer(prompt).input_ids
+            completion_ids = tokenizer(completion).input_ids
+            prompt_len = len(prompt_ids)
+            new_output_len = len(completion_ids) if output_len is None else output_len
+            if enable_multimodal_chat:
+                prompt = self.apply_multimodal_chat_transformation(prompt, None)
+            samples.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=new_output_len,
+                    lora_request=lora_request,
+                )
+            )
+        self.maybe_oversample_requests(samples, num_requests)
+        return samples
+
+
+# -----------------------------------------------------------------------------
+# LongBench Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class LongBenchDataset(BenchmarkDataset):
+    """
+    Implements the ShareGPT dataset.  Loads data from a JSON file and generates
+    sample requests based on conversation turns.
+    """
+
+    # DATAS =
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.load_data()
+
+    def load_data(self) -> None:
+        if self.dataset_path is None:
+            from datasets import load_dataset, concatenate_datasets
+            datasets = ["qasper", "multifieldqa_en", "hotpotqa", "2wikimqa", "gov_report", "multi_news", "trec", \
+                        "triviaqa", "samsum", "passage_count", "passage_retrieval_en", "lcc", "repobench-p"]
+
+            datas = []
+            for dataset in datasets:
+                data = load_dataset('THUDM/LongBench', f"{dataset}_e", split='test')
+                datas.append(data)
+            self.data = concatenate_datasets(datas)
+        else:
+            with open(self.dataset_path, encoding="utf-8") as f:
+                self.data = json.load(f)
+
+        self.data = [
+            (entry["context"], entry["input"])
+            for entry in self.data
+        ]
+        random.seed(self.random_seed)
+        random.shuffle(self.data)
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        lora_path: Optional[str] = None,
+        max_loras: Optional[int] = None,
+        output_len: Optional[int] = None,
+        enable_multimodal_chat: bool = False,
+        **kwargs,
+    ) -> list:
+        samples: list = []
+        from tqdm import tqdm
+        for entry in tqdm(self.data, total=num_requests, desc="Sampling LongBench requests"):
+            if len(samples) >= num_requests:
+                break
+            context, input = (
+                entry[0],
+                entry[1]
+            )
+
+            lora_request, tokenizer = self.get_random_lora_request(
+                tokenizer=tokenizer, max_loras=max_loras, lora_path=lora_path
+            )
+            messages = [
+                {"role": "user", "content": context},
+                {"role": "user", "content": input},
+            ]
+
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                # tokenizer_kwargs={"add_special_tokens": False},
+            )
+
+            prompt_ids = tokenizer(prompt).input_ids
+            prompt_len = len(prompt_ids)
+            new_output_len = output_len
+            if enable_multimodal_chat:
+                prompt = self.apply_multimodal_chat_transformation(prompt, None)
+            samples.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=new_output_len,
+                    lora_request=lora_request,
+                )
+            )
+        self.maybe_oversample_requests(samples, num_requests)
+        return samples
+
+
+
+# -----------------------------------------------------------------------------
+# LongBenchV2 Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class LongBenchV2Dataset(BenchmarkDataset):
+    """
+    Implements the ShareGPT dataset.  Loads data from a JSON file and generates
+    sample requests based on conversation turns.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.load_data()
+
+    def load_data(self) -> None:
+        if self.dataset_path is None:
+            import datasets
+            self.data = datasets.load_dataset(
+                "THUDM/LongBench-v2",
+                split="train",
+            )
+        else:
+            with open(self.dataset_path, encoding="utf-8") as f:
+                self.data = json.load(f)
+
+        import pdb; pdb.set_trace()
+        self.data = [
+            (entry["context"], entry["question"])
+            for entry in self.data
         ]
         random.seed(self.random_seed)
         random.shuffle(self.data)
@@ -418,24 +629,30 @@ class ShareGPTDataset(BenchmarkDataset):
         for entry in self.data:
             if len(samples) >= num_requests:
                 break
-            prompt, completion = (
-                entry["conversations"][0]["value"],
-                entry["conversations"][1]["value"],
+            context, question = (
+                entry[0],
+                entry[1]
             )
 
             lora_request, tokenizer = self.get_random_lora_request(
                 tokenizer=tokenizer, max_loras=max_loras, lora_path=lora_path
             )
+
+            messages = [
+                {"role": "user", "content": context},
+                {"role": "user", "content": question},
+            ]
+
+            # Apply chat template to the prompt
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+
             prompt_ids = tokenizer(prompt).input_ids
-            completion_ids = tokenizer(completion).input_ids
             prompt_len = len(prompt_ids)
-            new_output_len = len(completion_ids) if output_len is None else output_len
-            if not is_valid_sequence(
-                prompt_len,
-                new_output_len,
-                skip_min_output_len_check=output_len is not None,
-            ):
-                continue
+            new_output_len = output_len
             if enable_multimodal_chat:
                 prompt = self.apply_multimodal_chat_transformation(prompt, None)
             samples.append(

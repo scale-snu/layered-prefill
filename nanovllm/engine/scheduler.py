@@ -16,6 +16,7 @@ class Scheduler:
         self.prefilling: deque[Sequence] = deque()
         self.decoding: deque[Sequence] = deque()
         self.schedule_mode = config.schedule_mode
+        self.max_model_len = config.max_model_len
 
         # Staged-Prefill 모드일 때만 단계별 큐 생성
         # 각 단계마다 별도의 큐를 만들어 시퀀스를 단계별로 관리
@@ -32,6 +33,8 @@ class Scheduler:
         )
 
     def add(self, seq: Sequence):
+        if len(seq) > self.max_model_len:
+            raise ValueError(f"Sequence length {len(seq)} exceeds max model length {self.max_model_len}.")
         self.waiting.append(seq)
 
     def schedule(self) -> list[Sequence]:
@@ -68,12 +71,8 @@ class Scheduler:
                 num_batched_tokens += 1
                 self.block_manager.may_append(seq)
                 decode_scheduled_seqs.append(seq)
-<<<<<<< Updated upstream
-        
-=======
                 num_seqs += 1
 
->>>>>>> Stashed changes
         # prefill
         while (
             self.prefilling
@@ -307,7 +306,7 @@ class Scheduler:
             if seq.status == SequenceStatus.DECODING:
                 seq.append_token(token_id)  # 생성된 토큰을 시퀀스에 추가
                 # EOS 토큰이 생성되거나 최대 토큰 수에 도달하면 완료
-                if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
+                if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens or len(seq) >= self.max_model_len:
                     seq.status = SequenceStatus.FINISHED  # 상태를 FINISHED로 변경
                     self.block_manager.deallocate(seq)  # 메모리 블록 해제
                     self.decoding.remove(seq)  # 디코딩 큐에서 제거

@@ -63,6 +63,7 @@ from benchmark_dataset import (
     RandomDataset,
     SampleRequest,
     ShareGPTDataset,
+    LongBenchDataset,
     SonnetDataset,
     VisionArenaDataset,
 )
@@ -554,6 +555,7 @@ async def benchmark(
         "itls": [output.itl for output in outputs],
         "generated_texts": [output.generated_text for output in outputs],
         "errors": [output.error for output in outputs],
+        "request_dts": [output.request_dt.isoformat() for output in outputs],
     }
 
     if rps_change_events:
@@ -835,6 +837,13 @@ def main(args: argparse.Namespace):
                 num_requests=args.num_prompts,
                 output_len=args.sharegpt_output_len,
             ),
+            "longbench": lambda: LongBenchDataset(
+                random_seed=args.seed, dataset_path=args.dataset_path
+            ).sample(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+                output_len=args.longbench_output_len,
+            ),
             "burstgpt": lambda: BurstGPTDataset(
                 random_seed=args.seed, dataset_path=args.dataset_path
             ).sample(tokenizer=tokenizer, num_requests=args.num_prompts),
@@ -956,6 +965,7 @@ def main(args: argparse.Namespace):
                 "itls",
                 "generated_texts",
                 "errors",
+                "request_dts",
             ]:
                 if field in result_json:
                     del result_json[field]
@@ -1017,7 +1027,7 @@ def create_argument_parser():
         "--dataset-name",
         type=str,
         default="sharegpt",
-        choices=["sharegpt", "burstgpt", "sonnet", "random", "hf", "custom"],
+        choices=["sharegpt", "longbench", "burstgpt", "sonnet", "random", "hf", "custom"],
         help="Name of the dataset to benchmark on.",
     )
     parser.add_argument(
@@ -1227,6 +1237,14 @@ def create_argument_parser():
         default=None,
         help="Output length for each request. Overrides the output length "
         "from the ShareGPT dataset.",
+    )
+
+    longbench_group = parser.add_argument_group("longbench dataset options")
+    longbench_group.add_argument(
+        "--longbench-output-len",
+        type=int,
+        default=256,
+        help="Number of output tokens per request, used only for longbench dataset.",
     )
 
     random_group = parser.add_argument_group("random dataset options")
