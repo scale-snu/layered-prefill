@@ -177,6 +177,42 @@ class Scheduler:
 
         return scheduled_seqs
 
+    def get_num_stages(self, num_batched_tokens: int) -> int:
+        """
+        현재 배치된 토큰 수에 따라 필요한 단계 수를 계산
+        """
+        if len(self.stage_queue) == 16:
+            if num_batched_tokens <= 512:
+                return 1
+            elif num_batched_tokens <= 1024:
+                return 2
+            elif num_batched_tokens <= 2048:
+                return 4
+            elif num_batched_tokens <= 4096:
+                return 8
+            else:
+                return 16
+        elif len(self.stage_queue) == 4:
+            if num_batched_tokens <= 512:
+                return 1
+            elif num_batched_tokens <= 2048:
+                return 2
+            else:
+                return 4
+        elif len(self.stage_queue) == 12:
+            if num_batched_tokens <= 512:
+                return 1
+            elif num_batched_tokens <= 1024:
+                return 2
+            elif num_batched_tokens <= 2048:
+                return 4
+            elif num_batched_tokens <= 4096:
+                return 6
+            else:
+                return 12
+        else:
+            raise ValueError(f"Unsupported number of stages: {len(self.stage_queue)}")
+
     def staged_prefill_schedule(self) -> list[Sequence]:
         """
         Staged-Prefill 스케줄링: 프롬프트 처리를 여러 단계로 나누어 처리
@@ -190,41 +226,76 @@ class Scheduler:
         prefill_scheduled_seqs = []
         decode_scheduled_seqs = []
         num_seqs = 0
+        num_batched_tokens = 0
 
         # 1단계: 각 단계별 큐에서 하나씩 시퀀스 선택하여 처리
         # 각 단계에서 최대 하나의 시퀀스만 처리하여 메모리 사용량 제어
         for stage in range(len(self.stage_queue)):
-            if (
-                self.stage_queue[stage]  # 해당 단계에 시퀀스가 있는지 확인
-            ):
+            flag = False
+            while self.stage_queue[stage]:  # 해당 단계에 시퀀스가 있는지 확인
+                flag = True
                 seq = self.stage_queue[stage][0]  # 해당 단계의 첫 번째 시퀀스 선택
                 # 전체 프롬프트를 한 번에 처리 (청크로 나누지 않음)
-                num_tokens_to_process = len(seq) - seq.num_processed_tokens
-                seq.num_tokens_to_process = num_tokens_to_process
+                # num_tokens_to_process = len(seq) - seq.num_processed_tokens
+                # seq.num_tokens_to_process = num_tokens_to_process
 
                 self.stage_queue[stage].popleft()  # 선택된 시퀀스를 큐에서 제거
                 prefill_scheduled_seqs.append(seq)  # 처리할 시퀀스 목록에 추가
+
+            if flag:
                 break  # 하나의 시퀀스만 처리하고 종료
 
         # 2단계: 새로운 대기 시퀀스를 첫 번째 단계에 추가
         # 대기 중인 새로운 시퀀스가 있고, 시퀀스 수 제한을 넘지 않으면
-        if (
-            self.waiting
-            and num_seqs < self.max_num_seqs
-            and not prefill_scheduled_seqs
-        ):
-            seq = self.waiting[0]  # 대기 큐의 첫 번째 시퀀스
-            seq.stage = -1  # 새로운 시퀀스는 stage -1로 시작
-            seq.num_stages = len(self.stage_queue)  # 전체 단계 수 설정
-            if self.block_manager.can_allocate(seq):  # 메모리 블록 할당 가능한지 확인
-                self.block_manager.allocate(seq)  # 메모리 블록 할당
+        if not prefill_scheduled_seqs:
+            # prefill
+            while (
+                self.prefilling
+                and num_batched_tokens < self.max_num_batched_tokens
+            ):
+                seq = self.prefilling[0]
+                seq.stage = -1
+                seq.num_stages = -1
 
-                # 전체 프롬프트를 한 번에 처리
-                num_tokens_to_process = len(seq) - seq.num_processed_tokens
+                num_tokens_to_process = min(
+                    len(seq) - seq.num_processed_tokens,
+                    self.max_num_batched_tokens - num_batched_tokens,
+                )
+                num_seqs += 1
                 seq.num_tokens_to_process = num_tokens_to_process
+                num_batched_tokens += num_tokens_to_process
 
-                self.waiting.popleft()  # 대기 큐에서 제거
-                prefill_scheduled_seqs.append(seq)  # 처리할 시퀀스 목록에 추가
+                self.prefilling.popleft()
+                prefill_scheduled_seqs.append(seq)
+
+            while (
+                self.waiting
+                and num_seqs < self.max_num_seqs
+                and num_batched_tokens < self.max_num_batched_tokens
+            ):
+                seq = self.waiting[0]  # 대기 큐의 첫 번째 시퀀스
+                seq.stage = -1  # 새로운 시퀀스는 stage -1로 시작
+                seq.num_stages = -1  # 전체 단계 수 설정
+                if self.block_manager.can_allocate(seq):  # 메모리 블록 할당 가능한지 확인
+                    self.block_manager.allocate(seq)  # 메모리 블록 할당
+
+                    # 전체 프롬프트를 한 번에 처리
+                    num_tokens_to_process = min(
+                        len(seq) - seq.num_processed_tokens,
+                        self.max_num_batched_tokens - num_batched_tokens,
+                    )
+
+                    num_seqs += 1
+                    seq.num_tokens_to_process = num_tokens_to_process
+                    num_batched_tokens += num_tokens_to_process
+
+                    self.waiting.popleft()  # 대기 큐에서 제거
+                    prefill_scheduled_seqs.append(seq)  # 처리할 시퀀스 목록에 추가
+                else:
+                    break
+
+            for seq in prefill_scheduled_seqs:
+                seq.num_stages = self.get_num_stages(num_batched_tokens)
 
         # 3단계: 디코딩 중인 시퀀스들 처리
         # 프롬프트 처리가 완료되어 디코딩 단계에 있는 시퀀스들 처리
@@ -253,7 +324,7 @@ class Scheduler:
                 seq.status = SequenceStatus.PREFILLING  # 상태를 PREFILLING으로 변경
                 seq.stage += 1  # 단계를 1 증가 (예: -1 -> 0, 0 -> 1, ...)
                 # 다음 단계가 있으면 해당 단계 큐에 추가
-                if seq.stage < len(self.stage_queue):
+                if seq.stage < seq.num_stages:
                     self.stage_queue[seq.stage].append(seq)
 
         # 디코딩 시퀀스들을 디코딩 큐의 앞쪽에 추가 (우선순위 부여)
@@ -288,12 +359,17 @@ class Scheduler:
             if seq.status == SequenceStatus.PREFILLING:
                 if self.schedule_mode == "staged-prefill":
                     # Staged-Prefill 모드에서 마지막 단계를 완료한 경우
-                    if seq.stage == len(self.stage_queue) - 1:
-                        seq.status = SequenceStatus.DECODING  # 상태를 DECODING으로 변경
-                        self.stage_queue[seq.stage].remove(seq)  # 마지막 단계 큐에서 제거
-                        seq.stage += 1  # 단계를 1 증가 (디코딩 단계로)
-                        self.decoding.append(seq)  # 디코딩 큐에 추가
+                    if seq.stage == seq.num_stages - 1:
                         seq.num_processed_tokens += seq.num_tokens_to_process  # 처리된 토큰 수 업데이트
+                        if seq.num_processed_tokens >= seq.num_prompt_tokens:
+                            seq.status = SequenceStatus.DECODING  # 상태를 DECODING으로 변경
+                            self.stage_queue[seq.stage].remove(seq)  # 마지막 단계 큐에서 제거
+                            seq.stage += 1  # 단계를 1 증가 (디코딩 단계로)
+                            self.decoding.append(seq)  # 디코딩 큐에 추가
+                        else:
+                            seq.status = SequenceStatus.PREFILLING  # 상태를 PREFILLING으로 유지
+                            self.stage_queue[seq.stage].remove(seq)  # 마지막 단계 큐에서 제거
+                            self.prefilling.append(seq)  # 프리필링 큐에 추가
                 else:
                     # Chunked-Prefill 또는 Orca 모드
                     seq.num_processed_tokens += seq.num_tokens_to_process
