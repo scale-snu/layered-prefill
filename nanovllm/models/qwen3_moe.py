@@ -4,6 +4,7 @@ import torch.distributed as dist
 from transformers import Qwen3MoeConfig
 import numpy as np
 from typing import Callable, Literal, Optional, Union, overload, Any
+from collections import defaultdict
 
 from nanovllm.layers.activation import SiluAndMul
 from nanovllm.layers.attention import Attention
@@ -484,59 +485,75 @@ class Qwen3MoeModel(nn.Module):
                     residual = torch.cat([i_residual, residual[i_residual.size(0):]], dim=0)
 
             # 단계별 레이어 매핑 생성
-            prefill_compute_layer_map = {}
+            prefill_compute_layer_map = defaultdict(list)
             for idx, prefill_compute_layer in enumerate(context.prefill_compute_layers):
                 for layer_idx in prefill_compute_layer:
-                    prefill_compute_layer_map[layer_idx] = idx
+                    prefill_compute_layer_map[layer_idx].append(idx)
 
             if self.num_stages == -1:
                 slayers = [self.layers]
-                layers_per_stage = len(self.layers)
+                cum_layers_per_stage = [0]
             else:
                 # 단계별로 레이어를 나누기
                 slayers = np.array_split(self.layers, self.num_stages)
-                layers_per_stage = len(slayers[0])
+                cum_layers_per_stage = np.cumsum([0] + [len(s) for s in slayers[:-1]])
 
             # 각 레이어를 단계별로 처리
             for stage_idx, layers in enumerate(slayers):
-                if self.num_stages == -1 or stage_idx * layers_per_stage in prefill_compute_layer_map:
+                if self.num_stages == -1 or cum_layers_per_stage[stage_idx] in prefill_compute_layer_map:
                     for layer_idx, layer in enumerate(layers):
-                        layer_idx += layers_per_stage * stage_idx
+                        layer_idx = cum_layers_per_stage[stage_idx] + layer_idx
                         # 현재 단계에서 계산할 레이어
-                        idx = prefill_compute_layer_map[layer_idx]
+                        prefill_seq_indices = prefill_compute_layer_map[layer_idx]
 
-                        if prefill_compute_layer_map.get(layer_idx - 1, -1) != idx:
-                            start_idx = context.cu_seqlens_q[idx]
-                            end_idx = context.cu_seqlens_q[idx + 1]
-
-                            # 처리할 인덱스 계산 (현재 단계 + 디코딩 부분)
-                            indices = torch.cat([
-                                torch.arange(start_idx, end_idx, device=hidden_states.device),
+                        if prefill_compute_layer_map.get(layer_idx - 1) != prefill_seq_indices:
+                            indices = []
+                            for prefill_seq_idx in prefill_seq_indices:
+                                start_idx = context.cu_seqlens_q[prefill_seq_idx]
+                                end_idx = context.cu_seqlens_q[prefill_seq_idx + 1]
+                                indices.append(
+                                    torch.arange(start_idx, end_idx, device=hidden_states.device)
+                                )
+                            indices.append(
                                 torch.arange(len_staged_prefill, hidden_states.size(0), device=hidden_states.device)
-                            ])
+                            )
+                            indices = torch.cat(indices)
 
                             # 컨텍스트 정보 백업 및 수정
                             max_seqlen_k = context.max_seqlen_k
                             max_seqlen_q = context.max_seqlen_q
-                            context.max_seqlen_k = int(context.cu_seqlens_k[idx + 1] - context.cu_seqlens_k[idx])
-                            context.max_seqlen_q = int(context.cu_seqlens_q[idx + 1] - context.cu_seqlens_q[idx])
+                            context.max_seqlen_k = -1
+                            context.max_seqlen_q = -1
+                            for prefill_seq_idx in prefill_seq_indices:
+                                context.max_seqlen_k = max(context.max_seqlen_k, context.cu_seqlens_k[prefill_seq_idx + 1] - context.cu_seqlens_k[prefill_seq_idx])
+                                context.max_seqlen_q = max(context.max_seqlen_q, context.cu_seqlens_q[prefill_seq_idx + 1] - context.cu_seqlens_q[prefill_seq_idx])
 
                             # 시퀀스 길이 정보 수정
                             cu_seqlens_k = context.cu_seqlens_k.clone()
                             cu_seqlens_q = context.cu_seqlens_q.clone()
-                            context.cu_seqlens_k = cu_seqlens_k[idx:idx + 2] - cu_seqlens_k[idx]
-                            context.cu_seqlens_q = cu_seqlens_q[idx:idx + 2] - cu_seqlens_q[idx]
+                            context.cu_seqlens_k = [0]
+                            context.cu_seqlens_q = [0]
+                            for prefill_seq_idx in prefill_seq_indices:
+                                context.cu_seqlens_k.append(cu_seqlens_k[prefill_seq_idx + 1] - cu_seqlens_k[prefill_seq_idx])
+                                context.cu_seqlens_q.append(cu_seqlens_q[prefill_seq_idx + 1] - cu_seqlens_q[prefill_seq_idx])
+                            context.cu_seqlens_k = torch.tensor(context.cu_seqlens_k, device=hidden_states.device, dtype=torch.int32).cumsum(dim=0, dtype=torch.int32)
+                            context.cu_seqlens_q = torch.tensor(context.cu_seqlens_q, device=hidden_states.device, dtype=torch.int32).cumsum(dim=0, dtype=torch.int32)
 
                             # 블록 테이블 및 슬롯 매핑 수정
                             prefill_block_tables = None
                             if context.prefill_block_tables is not None:
                                 prefill_block_tables = context.prefill_block_tables.clone()
-                                context.prefill_block_tables = prefill_block_tables[start_idx:end_idx]
+                                context.prefill_block_tables = []
+                                for prefill_seq_idx in prefill_seq_indices:
+                                    start_idx = cu_seqlens_q[prefill_seq_idx]
+                                    end_idx = cu_seqlens_q[prefill_seq_idx + 1]
+                                    context.prefill_block_tables.append(prefill_block_tables[start_idx:end_idx])
+                                context.prefill_block_tables = torch.cat(context.prefill_block_tables, dim=0)
 
                             slot_mapping = None
                             if context.slot_mapping is not None:
                                 slot_mapping = context.slot_mapping.clone()
-                                context.slot_mapping = context.slot_mapping[indices]
+                                context.slot_mapping = slot_mapping[indices]
 
                             _positions = positions[indices]
                             _hidden_states = hidden_states[indices]
@@ -558,9 +575,10 @@ class Qwen3MoeModel(nn.Module):
                 else:
                     bs = hidden_states[len_staged_prefill:].size(0)
                     if bs > 0:
-                        if (stage_idx, bs) in self.graphs:
+                        nbs = next(x for x in self.graph_bs if x >= bs)
+                        if (stage_idx, nbs) in self.graphs:
                             # CUDA 그래프가 있는 경우
-                            graph = self.graphs[(stage_idx, bs)]
+                            graph = self.graphs[(stage_idx, nbs)]
                             graph_vars = self.graph_vars
 
                             for k, v in graph_vars.items():
@@ -609,13 +627,13 @@ class Qwen3MoeModel(nn.Module):
             # 최종 정규화 처리
             if len(self.layers) - 1 in prefill_compute_layer_map:
                 # 마지막 레이어가 현재 단계에 포함된 경우
-                idx = prefill_compute_layer_map[len(self.layers) - 1]
-                start_idx = context.cu_seqlens_q[idx]
-                end_idx = context.cu_seqlens_q[idx + 1]
-                indices = torch.cat([
-                    torch.arange(start_idx, end_idx, device=hidden_states.device),
-                    torch.arange(len_staged_prefill, hidden_states.size(0), device=hidden_states.device)
-                ])
+                indices = []
+                for prefill_seq_idx in prefill_compute_layer_map[len(self.layers) - 1]:
+                    start_idx = context.cu_seqlens_q[prefill_seq_idx]
+                    end_idx = context.cu_seqlens_q[prefill_seq_idx + 1]
+                    indices.append(torch.arange(start_idx, end_idx, device=hidden_states.device))
+                indices.append(torch.arange(len_staged_prefill, hidden_states.size(0), device=hidden_states.device))
+                indices = torch.cat(indices)
                 _hidden_states, _residual = self.norm(hidden_states[indices], residual[indices])
                 hidden_states[indices] = _hidden_states
                 residual[indices] = _residual
@@ -672,7 +690,8 @@ class Qwen3MoeModel(nn.Module):
                 _positions = positions[:bs].clone()
                 _hidden_states = hidden_states[:bs].clone()
                 _residual = residual[:bs].clone()
-                for layer_idx in np.arange(len(self.layers)).reshape(num_stages, -1)[ith_stage]:
+                # for layer_idx in np.arange(len(self.layers)).reshape(num_stages, -1)[ith_stage]:
+                for layer_idx in np.array_split(np.arange(len(self.layers)), num_stages)[ith_stage]:
                     layer = self.layers[layer_idx]
                     if layer_idx == 0:
                         # 첫 번째 단계에서는 입력을 받음
@@ -689,7 +708,8 @@ class Qwen3MoeModel(nn.Module):
                     _positions = positions[:bs].clone()
                     _hidden_states = hidden_states[:bs].clone()
                     _residual = residual[:bs].clone()
-                    for layer_idx in np.arange(len(self.layers)).reshape(num_stages, -1)[ith_stage]:
+                    # for layer_idx in np.arange(len(self.layers)).reshape(num_stages, -1)[ith_stage]:
+                    for layer_idx in np.array_split(np.arange(len(self.layers)), num_stages)[ith_stage]:
                         layer = self.layers[layer_idx]
                         if layer_idx == 0:
                             # 첫 번째 단계에서는 입력을 받음

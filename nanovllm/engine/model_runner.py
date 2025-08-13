@@ -307,7 +307,8 @@ class ModelRunner:
                 # Staged-Prefill 모드에서 중간 출력 처리
                 if seq.stage != -1:
                     # 현재 단계에서 계산할 레이어들 결정
-                    prefill_compute_layers.append(np.arange(self.num_layers).reshape(seq.num_stages, -1)[seq.stage].tolist())
+                    # prefill_compute_layers.append(np.arange(self.num_layers).reshape(seq.num_stages, -1)[seq.stage].tolist())
+                    prefill_compute_layers.append(np.array_split(np.arange(self.num_layers), seq.num_stages)[seq.stage].tolist())
 
                     # 이전 단계의 중간 출력 가져오기
                     i_hidden_states, i_residual = seq.intermediate_outputs if seq.intermediate_outputs else (None, None)
@@ -470,7 +471,7 @@ class ModelRunner:
                 seq.intermediate_outputs = (i_hidden_states, i_residual)
 
             # 마지막 단계 완료 후 중간 출력 삭제 (메모리 절약)
-            if seq.stage == seq.num_stages:
+            if seq.stage == seq.num_stages - 1:
                 seq.intermediate_outputs = None
 
             start_idx = end_idx
