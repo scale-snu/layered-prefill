@@ -63,6 +63,7 @@ from benchmark_dataset import (
     RandomDataset,
     SampleRequest,
     ShareGPTDataset,
+    ArxivDataset,
     LongBenchDataset,
     SonnetDataset,
     VisionArenaDataset,
@@ -837,6 +838,12 @@ def main(args: argparse.Namespace):
                 num_requests=args.num_prompts,
                 output_len=args.sharegpt_output_len,
             ),
+            "arxiv": lambda: ArxivDataset(
+                random_seed=args.seed, dataset_path=args.dataset_path
+            ).sample(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+            ),
             "longbench": lambda: LongBenchDataset(
                 random_seed=args.seed, dataset_path=args.dataset_path
             ).sample(
@@ -1027,7 +1034,7 @@ def create_argument_parser():
         "--dataset-name",
         type=str,
         default="sharegpt",
-        choices=["sharegpt", "longbench", "burstgpt", "sonnet", "random", "hf", "custom"],
+        choices=["sharegpt", "arxiv", "longbench", "burstgpt", "sonnet", "random", "hf", "custom"],
         help="Name of the dataset to benchmark on.",
     )
     parser.add_argument(
@@ -1237,6 +1244,15 @@ def create_argument_parser():
         default=None,
         help="Output length for each request. Overrides the output length "
         "from the ShareGPT dataset.",
+    )
+
+    arxiv_group = parser.add_argument_group("arxiv dataset options")
+    arxiv_group.add_argument(
+        "--arxiv-output-len",
+        type=int,
+        default=None,
+        help="Output length for each request. Overrides the output length "
+        "from the arxiv dataset.",
     )
 
     longbench_group = parser.add_argument_group("longbench dataset options")
