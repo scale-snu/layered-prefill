@@ -303,6 +303,19 @@ class RandomDataset(BenchmarkDataset):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
+        import datasets
+        self.data = datasets.load_dataset(
+            "Aeala/ShareGPT_Vicuna_unfiltered",
+            data_files={
+                "valid": "ShareGPT_V4.3_unfiltered_cleaned_split.json",
+            },
+            split="valid",
+        )
+        self.data = "\n".join([
+            "\n".join(msg["value"] for msg in entry["conversations"])
+            for entry in self.data
+            if "conversations" in entry and len(entry["conversations"]) >= 2
+        ])
 
     def sample(
         self,
@@ -323,12 +336,6 @@ class RandomDataset(BenchmarkDataset):
         num_special_tokens = tokenizer.num_special_tokens_to_add()
         real_input_len = input_len - num_special_tokens
 
-        prefix_token_ids = (
-            np.random.randint(0, vocab_size, size=prefix_len).tolist()
-            if prefix_len > 0
-            else []
-        )
-
         # New sampling logic: [X * (1 - b), X * (1 + b)]
         input_low = int(real_input_len * (1 - range_ratio))
         input_high = int(real_input_len * (1 + range_ratio))
@@ -339,26 +346,24 @@ class RandomDataset(BenchmarkDataset):
         logger.info("Sampling input_len from [%s, %s]", input_low, input_high)
         logger.info("Sampling output_len from [%s, %s]", output_low, output_high)
 
-        input_lens = np.random.randint(input_low, input_high + 1, size=num_requests)
+        input_lens = prefix_len + np.random.randint(input_low, input_high + 1, size=num_requests)
         output_lens = np.random.randint(output_low, output_high + 1, size=num_requests)
-        offsets = np.random.randint(0, vocab_size, size=num_requests)
+
+        chunk_start = 0
+        chunk_size = 4096
+        data = []
+        while len(data) < input_lens.sum():
+            input_ids = tokenizer(self.data[chunk_start:chunk_start+chunk_size]).input_ids
+            chunk_start += chunk_size
+            data.extend(input_ids)
 
         requests = []
+        start_idx = 0
         for i in range(num_requests):
-            inner_seq = (
-                (offsets[i] + i + np.arange(input_lens[i])) % vocab_size
-            ).tolist()
-            token_sequence = prefix_token_ids + inner_seq
+            token_sequence = data[start_idx:start_idx + input_lens[i]]
+            start_idx += input_lens[i]
             prompt = tokenizer.decode(token_sequence)
-            # After decoding the prompt we have to encode and decode it again.
-            # This is done because in some cases N consecutive tokens
-            # give a string tokenized into != N number of tokens.
-            # For example for GPT2Tokenizer:
-            # [6880, 6881] -> ['Ġcalls', 'here'] ->
-            # [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
-            # To avoid uncontrolled change of the prompt length,
-            # the encoded sequence is truncated before being decode again.
-            total_input_len = prefix_len + int(input_lens[i])
+            total_input_len = int(input_lens[i])
             re_encoded_sequence = tokenizer.encode(prompt, add_special_tokens=False)[
                 :total_input_len
             ]
@@ -391,10 +396,30 @@ class ShareGPTDataset(BenchmarkDataset):
 
     def load_data(self) -> None:
         import os
-        self.data = pd.read_csv(os.path.join(os.path.dirname(__file__), "preprocessed_traces/sharegpt_8k_filtered_stats_llama2_tokenizer.csv"))
-        self.data = [self.data.iloc[i] for i in range(len(self.data)) if self.data.iloc[i]["num_prefill_tokens"] > 0 and self.data.iloc[i]["num_decode_tokens"] > 0]
+        if self.dataset_path is None:
+            import datasets
+            self.data = datasets.load_dataset(
+                "Aeala/ShareGPT_Vicuna_unfiltered",
+                data_files={
+                    "valid": "ShareGPT_V4.3_unfiltered_cleaned_split.json",
+                },
+                split="valid",
+            )
+        else:
+            with open(self.dataset_path, encoding="utf-8") as f:
+                self.data = json.load(f)
+
+        self.data = [
+            entry["conversations"]
+            for entry in self.data
+            if "conversations" in entry and len(entry["conversations"]) >= 2
+        ]
+
+        self.len_data = pd.read_csv(os.path.join(os.path.dirname(__file__), "preprocessed_traces/sharegpt_8k_filtered_stats_llama2_tokenizer.csv"))
+        self.len_data = [self.len_data.iloc[i] for i in range(len(self.len_data)) if self.len_data.iloc[i]["num_prefill_tokens"] > 0 and self.len_data.iloc[i]["num_decode_tokens"] > 0]
         random.seed(self.random_seed)
         random.shuffle(self.data)
+        random.shuffle(self.len_data)
 
     def sample(
         self,
@@ -402,23 +427,63 @@ class ShareGPTDataset(BenchmarkDataset):
         num_requests: int,
         **kwargs,
     ) -> list:
-        vocab_size = tokenizer.vocab_size
+        value_key = "value" if "value" in self.data[0][0] else "content"
+
         num_special_tokens = tokenizer.num_special_tokens_to_add()
 
-        prefix_token_ids = []
-
-        offsets = np.random.randint(0, vocab_size, size=num_requests)
-
         requests = []
-        for i in range(num_requests):
-            input_len = self.data[i]["num_prefill_tokens"]
-            output_len = self.data[i]["num_decode_tokens"]
+        len_data_i = 0
+        i = 0
+        while len(requests) < num_requests:
+            i += 1
+            convroles=["user","assistant"]
+            roles = {"human": "user", "gpt": "assistant"}
+
+            def get_role(s):
+                if "from" in s:
+                    return roles[s["from"]]
+                else:
+                    return s["role"]
+
+            entry = self.data[i]
+
+            if get_role(entry[0]) != "user":
+                # Skip the first one if it is not from human
+                entry = entry[1:]
+
+            messages = []
+            for _ in range(10):
+                for j, sentence in enumerate(entry):
+                    role = get_role(sentence)
+
+                    assert role == convroles[j % 2]
+
+                    if role == "assistant":
+                        sentence[value_key] = " " + sentence[value_key]
+
+                    messages.append(
+                        {"role": role, "content": sentence[value_key]}
+                    )
+
+            messages = [
+                {
+                    "role": m["role"],
+                    "content": m["content"],
+                }
+                for m in messages
+            ]
+
+            # Apply chat template to the prompt
+            prompt = tokenizer.apply_chat_template(
+                messages[:-1],  # Exclude the last message for generation
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+
+            input_len = self.len_data[len_data_i]["num_prefill_tokens"]
+            output_len = self.len_data[len_data_i]["num_decode_tokens"]
             real_input_len = int(input_len - num_special_tokens)
-            inner_seq = (
-                (offsets[i] + i + np.arange(real_input_len)) % vocab_size
-            ).tolist()
-            token_sequence = prefix_token_ids + inner_seq
-            prompt = tokenizer.decode(token_sequence)
+
             # After decoding the prompt we have to encode and decode it again.
             # This is done because in some cases N consecutive tokens
             # give a string tokenized into != N number of tokens.
@@ -434,6 +499,9 @@ class ShareGPTDataset(BenchmarkDataset):
             ]
             prompt = tokenizer.decode(re_encoded_sequence)
             total_input_len = len(re_encoded_sequence)
+
+            if total_input_len < input_len:
+                continue
             requests.append(
                 SampleRequest(
                     prompt=prompt,
@@ -441,6 +509,7 @@ class ShareGPTDataset(BenchmarkDataset):
                     expected_output_len=output_len,
                 )
             )
+            len_data_i += 1
         return requests
 
 
@@ -463,54 +532,78 @@ class ArxivDataset(BenchmarkDataset):
 
     def load_data(self) -> None:
         import os
-        self.data = pd.read_csv(os.path.join(os.path.dirname(__file__), "preprocessed_traces/arxiv_summarization_filtered_stats_llama2_tokenizer.csv"))
-        self.data = [self.data.iloc[i] for i in range(len(self.data)) if self.data.iloc[i]["num_prefill_tokens"] > 0 and self.data.iloc[i]["num_decode_tokens"] > 0]
-        random.seed(self.random_seed)
-        random.shuffle(self.data)
+
+        import datasets
+        self.data = datasets.load_dataset(
+            "ccdv/arxiv-summarization",
+            split="test",
+        )
+        self.data = [
+            (entry["article"], entry["abstract"])
+            for entry in self.data
+        ]
+
+        # self.len_data = pd.read_csv(os.path.join(os.path.dirname(__file__), "preprocessed_traces/arxiv_summarization_filtered_stats_llama2_tokenizer.csv"))
+        # self.len_data = [self.len_data.iloc[i] for i in range(len(self.len_data)) if self.len_data.iloc[i]["num_prefill_tokens"] > 0 and self.len_data.iloc[i]["num_decode_tokens"] > 0]
+        # random.seed(self.random_seed)
+        # random.shuffle(self.data)
+        # random.shuffle(self.len_data)
 
     def sample(
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
+        output_len: Optional[int] = None,
         **kwargs,
     ) -> list:
-        vocab_size = tokenizer.vocab_size
-        num_special_tokens = tokenizer.num_special_tokens_to_add()
-
-        prefix_token_ids = []
-
-        offsets = np.random.randint(0, vocab_size, size=num_requests)
-
         requests = []
         for i in range(num_requests):
-            input_len = self.data[i]["num_prefill_tokens"]
-            output_len = self.data[i]["num_decode_tokens"]
-            real_input_len = int(input_len - num_special_tokens)
-            inner_seq = (
-                (offsets[i] + i + np.arange(real_input_len)) % vocab_size
-            ).tolist()
-            token_sequence = prefix_token_ids + inner_seq
-            prompt = tokenizer.decode(token_sequence)
-            # After decoding the prompt we have to encode and decode it again.
-            # This is done because in some cases N consecutive tokens
-            # give a string tokenized into != N number of tokens.
-            # For example for GPT2Tokenizer:
-            # [6880, 6881] -> ['Ġcalls', 'here'] ->
-            # [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
-            # To avoid uncontrolled change of the prompt length,
-            # the encoded sequence is truncated before being decode again.
-            total_input_len = int(real_input_len)
+            # entry = self.data[i]
+            # article, abstract = (
+            #     entry[0],
+            #     entry[1]
+            # )
 
-            re_encoded_sequence = tokenizer.encode(prompt, add_special_tokens=False)[
-                :total_input_len
+            # output_token_ids = tokenizer.encode(abstract, add_special_tokens=False)
+            # output_len = len(output_token_ids)
+
+            # input_token_ids = tokenizer.encode(article, add_special_tokens=False)
+            # total_input_len = len(input_token_ids)
+            # requests.append(
+            #     SampleRequest(
+            #         prompt=article,
+            #         prompt_len=total_input_len,
+            #         expected_output_len=output_len,
+            #     )
+            # )
+            entry = self.data[i]
+            article, abstract = (
+                entry[0],
+                entry[1]
+            )
+
+            messages = [
+                {"role": "user", "content": article + "\n\nSummarize the above article.\n\n"},
             ]
-            prompt = tokenizer.decode(re_encoded_sequence)
-            total_input_len = len(re_encoded_sequence)
+
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                # tokenizer_kwargs={"add_special_tokens": False},
+            )
+
+            output_token_ids = tokenizer.encode(abstract, add_special_tokens=False)
+            new_output_len = len(output_token_ids) if output_len is None else output_len
+
+            input_token_ids = tokenizer.encode(prompt, add_special_tokens=False)
+            total_input_len = len(input_token_ids)
+
             requests.append(
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=total_input_len,
-                    expected_output_len=output_len,
+                    expected_output_len=new_output_len,
                 )
             )
         return requests

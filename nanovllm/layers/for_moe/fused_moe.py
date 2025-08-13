@@ -4,14 +4,70 @@
 import functools
 import json
 import os
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
 
-from nanovllm.layers.for_moe.moe_easy_kernel import topk_softmax, moe_sum, silu_and_mul, gelu_and_mul
-from nanovllm.layers.for_moe.moe_align_block_size import moe_align_block_size
+from nanovllm.layers.for_moe.moe_easy_kernel import topk_softmax, moe_sum, silu_and_mul, gelu_and_mul, swigluoai
+from nanovllm import ops
+
+
+def moe_align_block_size(
+    topk_ids: torch.Tensor, block_size: int, num_experts: int
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Aligns the token distribution across experts to be compatible with block
+    size for matrix multiplication.
+
+    Parameters:
+    - topk_ids: A tensor of shape [total_tokens, top_k] representing the
+        top-k expert indices for each token.
+    - block_size: The block size used in block matrix multiplication.
+    - num_experts: The total number of experts.
+
+    Returns:
+    - sorted_token_ids: A tensor containing the sorted token indices according
+        to their allocated expert.
+    - expert_ids: A tensor indicating the assigned expert index for each block.
+    - num_tokens_post_padded: The total number of tokens after padding,
+        ensuring divisibility by block_size.
+
+    This function pads the number of tokens that each expert needs to process
+    so that it is divisible by block_size.
+    Padding ensures that during block matrix multiplication, the dimensions
+    align correctly.
+
+    Example:
+    Given topk_ids = [[2, 3, 4], [1, 2, 4], [1, 3, 4], [1, 2, 3]],
+    block_size = 4, and num_experts = 4:
+    - We initially have 12 tokens (after repeating 'top_k' times) and 4 experts,
+        with each expert needing to process 3 tokens.
+    - As block_size is 4, we pad 1 token for each expert.
+    - First, flatten topk_ids to [2, 3, 4, 1, 2, 4, 1, 3, 4, 1, 2, 3].
+    - Then append padding tokens [12, 12, 12, 12] for each block.
+    - After sorting by expert index, we obtain token_ids
+        [3, 6, 9, 12, 0, 4, 10, 12, 1, 7, 11, 12, 2, 5, 8, 12].
+        Tokens 12 are non-existent (padding) and are ignored in
+        the subsequent matrix multiplication.
+    - The padding ensures that the total number of tokens is now divisible
+        by block_size for proper block matrix operations.
+    """
+    max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
+    sorted_ids = torch.empty(
+        (max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device
+    )
+    sorted_ids.fill_(topk_ids.numel())
+    max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
+    expert_ids = torch.empty(
+        (max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device
+    )
+    num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
+    ops.moe_align_block_size(
+        topk_ids, num_experts, block_size, sorted_ids, expert_ids, num_tokens_post_pad
+    )
+    return sorted_ids, expert_ids, num_tokens_post_pad
 
 
 @triton.jit
@@ -31,6 +87,7 @@ def fused_moe_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
+    b_bias_ptr,
     a_scale_ptr,
     b_scale_ptr,
     topk_weights_ptr,
@@ -58,6 +115,8 @@ def fused_moe_kernel(
     stride_bse,
     stride_bsk,
     stride_bsn,
+    stride_bbe,  # bias expert stride
+    stride_bbn,  # bias N stride
     # Block size for block-wise quantization
     group_n: tl.constexpr,
     group_k: tl.constexpr,
@@ -70,6 +129,7 @@ def fused_moe_kernel(
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
     per_channel_quant: tl.constexpr,
+    HAS_BIAS: tl.constexpr = 0,
 ):
     # -----------------------------------------------------------
     # Map program ids `pid` to the block of C it should compute.
@@ -117,6 +177,11 @@ def fused_moe_kernel(
     b_ptrs = b_ptr + off_experts * stride_be + (offs_k[:, None] * stride_bk +
                                                 offs_bn[None, :] * stride_bn)
 
+    if HAS_BIAS:
+        # bias shape: [num_experts, N]
+        bias_ptrs = b_bias_ptr + off_experts * stride_bbe + offs_bn * stride_bbn
+        bias = tl.load(bias_ptrs, mask=(offs_bn < N), other=0.0)
+
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
     # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
@@ -139,12 +204,15 @@ def fused_moe_kernel(
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
 
+    if HAS_BIAS:
+        accumulator = accumulator + bias[None, :]
+
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token,
                              mask=token_mask,
                              other=0)
         accumulator = accumulator * moe_weight[:, None]
-    
+
     accumulator = accumulator.to(compute_type)
     # -----------------------------------------------------------
     # Write back the block of the output
@@ -170,7 +238,9 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
                             config: dict[str, Any],
                             compute_type: tl.dtype,
                             per_channel_quant: bool,
-                            block_shape: Optional[list[int]] = None) -> None:
+                            block_shape: Optional[list[int]] = None,
+                            B_bias: Optional[torch.Tensor] = None,
+                            ) -> None:
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
@@ -178,9 +248,11 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
     assert A_scale is None
     assert B_scale is None
 
+
     M = A.size(0)
     num_tokens = M * top_k
 
+    HAS_BIAS = B_bias is not None
     EM = sorted_token_ids.size(0)
     if A.size(0) < config["BLOCK_SIZE_M"]:
         # optimize for small batch_size.
@@ -201,6 +273,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         A,
         B,
         C,
+        B_bias,
         A_scale,
         B_scale,
         topk_weights,
@@ -228,6 +301,8 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         if B_scale is not None and B_scale.ndim == 3 else 0,
         B_scale.stride(1)
         if B_scale is not None and B_scale.ndim >= 2 else 0,
+        B_bias.stride(0) if B_bias is not None else 0,
+        B_bias.stride(1) if B_bias is not None else 0,
         0 if block_shape is None else block_shape[0],
         0 if block_shape is None else block_shape[1],
         MUL_ROUTED_WEIGHT=mul_routed_weight,
@@ -235,6 +310,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         compute_type=compute_type,
         per_channel_quant=per_channel_quant,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
+        HAS_BIAS=1 if HAS_BIAS else 0,
         **config,
     )
 
@@ -313,49 +389,41 @@ def try_get_optimal_moe_config(
         }
     return config
 
+
 def fused_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
-    indices_type: Optional[torch.dtype] = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    assert hidden_states.size(0) == gating_output.size(0), (
-        "Number of tokens mismatch")
+):
+    assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
 
-    M, _ = hidden_states.size()
+    M, _ = hidden_states.shape
 
-    topk_weights = torch.empty(M,
-                               topk,
-                               dtype=torch.float32,
-                               device=hidden_states.device)
-    topk_ids = torch.empty(
-        M,
-        topk,
-        dtype=torch.int32 if indices_type is None else indices_type,
-        device=hidden_states.device)
-    token_expert_indices = torch.empty(M,
-                                       topk,
-                                       dtype=torch.int32,
-                                       device=hidden_states.device)
-
-    gating_output_float = gating_output.float()  # TODO(woosuk): Optimize this.
-
-    topk_softmax(
+    topk_weights = torch.empty(
+        M, topk, dtype=torch.float32, device=hidden_states.device
+    )
+    topk_ids = torch.empty(M, topk, dtype=torch.int32, device=hidden_states.device)
+    token_expert_indicies = torch.empty(
+        M, topk, dtype=torch.int32, device=hidden_states.device
+    )
+    ops.topk_softmax(
         topk_weights,
         topk_ids,
-        token_expert_indices,
-        gating_output,
+        token_expert_indicies,
+        gating_output.float(),  # TODO(woosuk): Optimize this.
     )
+
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    return topk_weights, topk_ids, token_expert_indicies
 
-    return topk_weights, topk_ids, token_expert_indices
-    
 
 def fused_experts(hidden_states: torch.Tensor,
                   w1: torch.Tensor,
                   w2: torch.Tensor,
+                  w1_bias: Optional[torch.Tensor],
+                  w2_bias: Optional[torch.Tensor],
                   topk_weights: torch.Tensor,
                   topk_ids: torch.Tensor,
                   inplace: bool = False,
@@ -378,18 +446,18 @@ def fused_experts(hidden_states: torch.Tensor,
 
     if inplace:
         fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids, True,
-                       activation, apply_router_weight_on_input, 
+                       activation, apply_router_weight_on_input,
                        per_channel_quant, global_num_experts, expert_map,
                        w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
-                       block_shape)
+                       block_shape, w1_bias, w2_bias)
         return hidden_states
-    
+
     return fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids,
                               False, activation, apply_router_weight_on_input,
                               per_channel_quant,
                               global_num_experts, expert_map, w1_scale,
                               w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
-                              block_shape)
+                              block_shape, w1_bias, w2_bias)
 def fused_experts_impl(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -409,6 +477,8 @@ def fused_experts_impl(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[list[int]] = None,
+    w1_bias: Optional[torch.Tensor] = None,
+    w2_bias: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     # Check constraints.
     assert hidden_states.size(1) == w1.size(2), (
@@ -504,7 +574,7 @@ def fused_experts_impl(
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
             moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
-                                 global_num_experts, expert_map))
+                                 global_num_experts))
 
         invoke_fused_moe_kernel(qcurr_hidden_states,
                                 w1,
@@ -521,12 +591,16 @@ def fused_experts_impl(
                                 config,
                                 compute_type=compute_type,
                                 per_channel_quant=per_channel_quant,
-                                block_shape=block_shape)
+                                block_shape=block_shape,
+                                B_bias=w1_bias,
+                                )
 
         if activation == "silu":
-            silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
+            ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
         elif activation == "gelu":
             gelu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
+        elif activation == "swigluoai":
+            ops.swigluoai_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N), 1.702, 7.0)
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
@@ -549,7 +623,9 @@ def fused_experts_impl(
                                 config,
                                 compute_type=compute_type,
                                 per_channel_quant=per_channel_quant,
-                                block_shape=block_shape)
+                                block_shape=block_shape,
+                                B_bias=w2_bias,
+                                )
 
         moe_sum(intermediate_cache3.view(*intermediate_cache3.size()),
                     out_hidden_states[begin_chunk_idx:end_chunk_idx])

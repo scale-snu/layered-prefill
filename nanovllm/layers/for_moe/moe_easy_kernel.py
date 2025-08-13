@@ -43,10 +43,10 @@ def silu_and_mul(out: torch.Tensor, input: torch.Tensor):
     x = input[:, :d]
     y = input[:, d:]
     # silu(x) = x * sigmoid(x)
-    torch.mul(x * torch.sigmoid(x), y, out=out) 
+    torch.mul(x * torch.sigmoid(x), y, out=out)
 
 # silu and mul is appropriate to use triton kernel than topk_softmax and moe_sum
-# however I use pytorch-based kernel now for simplicity 
+# however I use pytorch-based kernel now for simplicity
 @triton.jit
 def silu_and_mul_kernel(
     input_ptr,  # [num_tokens, 2*d]
@@ -74,7 +74,6 @@ def silu_and_mul_triton(output: torch.Tensor, input: torch.Tensor):
     assert input.ndim == 2 and output.ndim == 2
     num_tokens, two_d = input.shape
     d = two_d // 2
-    # d보다 크거나 같은 2의 제곱수, 최대 128
     block_size = 1 << (d - 1).bit_length()
     block_size = min(block_size, 128)
     grid = (num_tokens,)
@@ -93,16 +92,13 @@ def gelu_and_mul(out: torch.Tensor, x: torch.Tensor):
     x: (num_tokens, 2 * d)
     """
     d = x.shape[-1] // 2
-    # 앞 절반에 GELU 적용
     x0 = x[..., :d]
     x1 = x[..., d:]
-    # PyTorch의 GELU (기본은 'none' approximation)
     gelu_x0 = F.gelu(x0)
-    # 곱셈 후 out에 저장 (in-place)
     out.copy_(gelu_x0 * x1)
 
 # gelu and mul is appropriate to use triton kernel than topk_softmax and moe_sum
-# however I use pytorch-based kernel now for simplicity 
+# however I use pytorch-based kernel now for simplicity
 @triton.jit
 def gelu_and_mul_kernel(
     x_ptr,         # input: [num_tokens, 2 * d]
@@ -147,3 +143,16 @@ def gelu_and_mul_triton(out: torch.Tensor, x: torch.Tensor):
         out.stride(0), out.stride(1),
         BLOCK_SIZE
     )
+
+def swigluoai(out: torch.Tensor, x: torch.Tensor, alpha: float = 1.702, limit: float = 7.0):
+    """
+    out: (num_tokens, d)
+    x: (num_tokens, 2 * d)
+    """
+
+    gate, up = x[..., ::2], x[..., 1::2]
+    gate = gate.clamp(min=None, max=limit)
+    up = up.clamp(min=-limit, max=limit)
+    glu = gate * torch.sigmoid(gate * alpha)
+    gated_output = (up + 1) * glu
+    out.copy_(gated_output)

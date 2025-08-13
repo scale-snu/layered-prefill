@@ -4,6 +4,8 @@ import torch.nn.functional as F
 import torch.distributed as dist
 
 from nanovllm.utils.context import get_context
+from nanovllm.layers.custom_all_reduce import tensor_model_parallel_all_reduce
+# from nanovllm.layers.nccl_communicator import tensor_model_parallel_all_reduce
 
 
 class VocabParallelEmbedding(nn.Module):
@@ -39,7 +41,7 @@ class VocabParallelEmbedding(nn.Module):
         y = F.embedding(x, self.weight)
         if self.tp_size > 1:
             y = mask.unsqueeze(1) * y
-            dist.all_reduce(y)
+            y = tensor_model_parallel_all_reduce(y)
         return y
 
 
@@ -61,7 +63,7 @@ class ParallelLMHead(VocabParallelEmbedding):
     def forward(self, x: torch.Tensor):
         context = get_context()
         if context.is_prefill:
-            len_prefill = context.cu_seqlens_q[-1]
+            len_prefill = context.len_prefill
             prefill_indices = context.cu_seqlens_q[1:] - 1
             decode_indices = torch.arange(len_prefill, x.size(0), device=x.device)
             last_indices = torch.cat([

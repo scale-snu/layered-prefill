@@ -3,8 +3,13 @@
 ## How to install
 
 ```bash
-pip install torch
-pip install -e .
+conda create -n layered-prefill python=3.10 -y
+conda install -n layered-prefill cuda-toolkit cuda-version=12.8 cmake ninja ccache c-compiler cxx-compiler -c nvidia
+conda activate layered-prefill
+pip install torch==2.8.0 uv httpie psutil amd-quark
+# pip install flash-attn
+CCACHE_NOHASHDIR="true" uv pip install -e . --no-build-isolation --verbose --refresh
+TORCH_CUDA_ARCH_LIST="8.0;9.0" CCACHE_NOHASHDIR="true" uv pip install -e flash-attention --verbose --refresh --no-build-isolation
 ```
 
 ## How to run

@@ -14,6 +14,10 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+import numpy as np
+import nvtx
+import torch
+
 from nanovllm.sampling_params import SamplingParams
 from nanovllm.engine.async_llm_engine import AsyncLLMEngine
 from nanovllm.entrypoints.config import APIServerConfig
@@ -58,8 +62,11 @@ async def generate(request: Request) -> Response:
         async for request_output in results_generator:
             text_outputs = request_output[1]
             token_ids = request_output[2]
+            if isinstance(token_ids, np.ndarray):
+                token_ids = token_ids.tolist()
             ret = {"generated_text": text_outputs, "output_tokens": token_ids}
-            yield (json.dumps(ret) + "\n").encode("utf-8")
+            ret = (json.dumps(ret) + "\n").encode("utf-8")
+            yield ret
 
     if stream:
         return StreamingResponse(stream_results())
@@ -105,11 +112,11 @@ def parse_args() -> APIServerConfig:
                         help="Port for the API server.")
     parser.add_argument("--nccl-port", type=int, default=2333,
                         help="NCCL port for distributed training.")
-    parser.add_argument("--schedule-mode", type=str, default="staged-prefill",
-                        choices=["staged-prefill", "orca", "chunked-prefill"],
+    parser.add_argument("--schedule-mode", type=str, default="layered-prefill",
+                        choices=["layered-prefill", "orca", "chunked-prefill"],
                         help="Scheduling mode for the generation.")
     parser.add_argument("--num-stages", type=int, default=2,
-                        help="Number of stages for staged prefill scheduling.")
+                        help="Number of stages for layered prefill scheduling.")
     args = parser.parse_args()
 
     return args

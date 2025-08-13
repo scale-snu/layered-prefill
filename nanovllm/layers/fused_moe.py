@@ -12,7 +12,8 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from torch.nn.parameter import UninitializedParameter
 
-from nanovllm.layers.nccl_communicator import tensor_model_parallel_all_reduce
+from nanovllm.layers.custom_all_reduce import tensor_model_parallel_all_reduce
+# from nanovllm.layers.nccl_communicator import tensor_model_parallel_all_reduce
 from nanovllm.layers.for_moe.utils import set_weight_attrs
 from nanovllm.layers.for_moe.fused_moe import fused_experts
 
@@ -101,6 +102,9 @@ class FusedMoEMethodBase(ABC):
     ) -> torch.Tensor:
         raise NotImplementedError
 
+# count_tensor: torch.Tensor
+# count: torch.Tensor
+
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
     """MoE method without quantization."""
 
@@ -114,7 +118,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
-                       params_dtype: torch.dtype, **extra_weight_attrs):
+                       params_dtype: torch.dtype,
+                       has_bias: bool = False,
+                       **extra_weight_attrs):
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(torch.empty(
             num_experts,
@@ -124,6 +130,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
                                         requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
+        if has_bias:
+            w13_bias = torch.nn.Parameter(torch.zeros(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                dtype=params_dtype),
+                                          requires_grad=False)
+            layer.register_parameter("w13_bias", w13_bias)
+            set_weight_attrs(w13_bias, extra_weight_attrs)
 
         # down_proj (row parallel)
         w2_weight = torch.nn.Parameter(torch.empty(
@@ -134,6 +148,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
                                        requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
+        if has_bias:
+            w2_bias = torch.nn.Parameter(torch.zeros(num_experts,
+                                                     hidden_size,
+                                                     dtype=params_dtype),
+                                         requires_grad=False)
+            layer.register_parameter("w2_bias", w2_bias)
+            set_weight_attrs(w2_bias, extra_weight_attrs)
+
+        # global count_tensor, count
+        # count_tensor = torch.zeros(num_experts, dtype=torch.int32).cuda()
+        # count = torch.zeros(num_experts, dtype=torch.int32).cuda()
 
     def apply(
         self,
@@ -170,10 +195,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
 
+        # global count_tensor, count
+        # count.zero_()
+        # count[topk_ids.flatten()] += 1
+        # count_tensor.add_((count > 0).int())
+
         return self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
+                w1_bias=layer.w13_bias if hasattr(layer, "w13_bias") else None,
+                w2_bias=layer.w2_bias if hasattr(layer, "w2_bias") else None,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 inplace=True,
@@ -207,6 +239,7 @@ class FusedMoE(torch.nn.Module):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         num_redundant_experts: int = 0,
+        has_bias=False,
     ):
         super().__init__()
         if params_dtype is None:
@@ -277,6 +310,7 @@ class FusedMoE(torch.nn.Module):
             self.intermediate_size_per_partition,
             "params_dtype": params_dtype,
             "weight_loader": self.weight_loader,
+            "has_bias": has_bias,
         }
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
@@ -324,6 +358,9 @@ class FusedMoE(torch.nn.Module):
             :param tp_rank: tensor parallel rank
             :param load_full_w2: whether or not the w2 loaded should be sharded.
         """
+        if expert_data.ndim != loaded_weight.ndim:
+            loaded_weight = loaded_weight.reshape(*loaded_weight.shape[:-2], -1)
+
         if shard_id == "w2":
             # In the case where we have actorder/g_idx, we do not partition the
             # w2 scales, as indicated by `load_full` argument, for all tp cases
@@ -338,6 +375,11 @@ class FusedMoE(torch.nn.Module):
                            loaded_weight=loaded_weight,
                            expert_data=expert_data,
                            tp_rank=tp_rank)
+        elif shard_id in ("w13",):
+            # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
+            shard_size = expert_data.shape[1]
+            loaded_w = loaded_weight.narrow(1, shard_size * tp_rank, shard_size)
+            expert_data.narrow(1, 0, shard_size).copy_(loaded_w)
 
     def _load_per_channel_weight_scale(self, expert_data: torch.Tensor,
                                        shard_dim: int, shard_id: str,
@@ -434,6 +476,16 @@ class FusedMoE(torch.nn.Module):
                       shard_id: str,
                       expert_id: int,
                       return_success: bool = False) -> Optional[bool]:
+        if shard_id == "all":
+            # (FIXME) for gpt-oss all experts are combined
+            if "bias" in weight_name:
+                param.data.copy_(loaded_weight)
+            else:
+                param_shape = param.data.shape
+                loaded_weight = loaded_weight.reshape(*param_shape[:-1], -1)
+                param.data.copy_(loaded_weight)
+            return True if return_success else None
+
         expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
         if expert_id == -1:
             # Failed to load this param since it's not local to this rank
@@ -442,8 +494,8 @@ class FusedMoE(torch.nn.Module):
 
         quant_method_name = self.quant_method.__class__.__name__
 
-        if shard_id not in ("w1", "w2", "w3"):
-            raise ValueError(f"shard_id must be ['w1','w2','w3'] but "
+        if shard_id not in ("w1", "w2", "w3", "all", "w13"):
+            raise ValueError(f"shard_id must be ['w1','w2','w3', 'all'] but "
                              f"got {shard_id}.")
 
         WEIGHT_SCALE_SUPPORTED = [
@@ -452,7 +504,7 @@ class FusedMoE(torch.nn.Module):
         # Fetch the dim to shard the parameter/loaded weight
         # based on the shard id. This will be whatever
         # dimension intermediate_size_per_partition is used.
-        SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0}
+        SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0, "w13": 1}
 
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
         is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
@@ -469,7 +521,7 @@ class FusedMoE(torch.nn.Module):
         if is_transposed:
             shard_dim = int(not shard_dim)
 
-        full_load = len(loaded_weight.shape) == 3
+        full_load = len(loaded_weight.shape) == 3 or "bias" in weight_name or "block" in weight_name
         if full_load:
             shard_dim += 1
 
@@ -582,6 +634,27 @@ class FusedMoE(torch.nn.Module):
                 tp_rank=self.tp_rank)
             return True if return_success else None
 
+        # Case model weights
+        if "block" in weight_name:
+            self._load_model_weight_or_group_weight_scale(
+                shard_id=shard_id,
+                shard_dim=-1,
+                loaded_weight=loaded_weight,
+                expert_data=expert_data,
+                tp_rank=self.tp_rank)
+            return True if return_success else None
+
+        if "bias" in weight_name:
+            if shard_id == "w2":
+                if self.tp_rank == 0:
+                    expert_data.copy_(loaded_weight)
+            else:
+                loaded_weight = loaded_weight.narrow(-1, self.tp_rank * loaded_weight.size(-1) // self.tp_size, loaded_weight.size(-1) // self.tp_size)
+                expert_data.copy_(loaded_weight)
+            return True if return_success else None
+
+        raise ValueError(f"Unrecognized weight_name {weight_name}.")
+
         return False if return_success else None
 
     def get_expert_weights(self) -> Iterable[torch.Tensor]:
@@ -655,7 +728,6 @@ class FusedMoE(torch.nn.Module):
                 gating_output=router_logits,
                 topk=top_k,
                 renormalize=renormalize,
-                indices_type=indices_type,
             )
         else:
             topk_weights, topk_ids = custom_routing_function(
@@ -700,10 +772,17 @@ class FusedMoE(torch.nn.Module):
             logical_replica_count=self.logical_replica_count,
         )
 
+        # if hidden_states.shape[0] <= 10:
+        #     print(self.tp_rank, final_hidden_states)
+
         if self.reduce_results and (self.tp_size > 1):
             # Default set to False. (May have to add shared expert outputs.
             final_hidden_states = self.maybe_all_reduce_tensor_model_parallel(
                 final_hidden_states)
+
+        # if hidden_states.shape[0] <= 10:
+        #     print(self.tp_rank, final_hidden_states)
+        #     exit(0)
 
         return final_hidden_states
 

@@ -1,5 +1,7 @@
 import os
 from dataclasses import dataclass
+
+import torch
 from transformers import AutoConfig
 
 
@@ -17,20 +19,22 @@ class Config:
     nccl_port: int = 2333
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
-    # 스케줄링 모드 설정
-    # "chunked-prefill": 프롬프트를 청크 단위로 나누어 처리 (기본값)
-    # "orca": 프롬프트를 한 번에 완전히 처리
-    # "staged-prefill": 프롬프트를 여러 단계로 나누어 처리
-    schedule_mode: str = "chunked-prefill" # or "orca" or "staged-prefill"
-    # Staged-Prefill 모드에서 사용할 단계 수
-    # 각 단계마다 별도의 큐가 생성되어 시퀀스를 단계별로 관리
-    # 예: num_stages=4이면 4단계로 나누어 처리
+    # Scheduling mode settings
+    # "chunked-prefill": Split prompt into chunks (default)
+    # "orca": Process the entire prompt at once
+    # "layered-prefill": Split prompt into multiple stages
+    schedule_mode: str = "chunked-prefill" # or "orca" or "layered-prefill"
+    # Number of stages to use in layered-prefill mode
+    # Each stage creates a separate queue to manage sequences by stage
+    # Example: num_stages=4 means processing in 4 stages
     num_stages: int = 4
+    rpc_base_path: str = "/tmp"
 
     def __post_init__(self):
         # assert os.path.isdir(self.model)
         assert self.kvcache_block_size % 256 == 0
         assert 1 <= self.tensor_parallel_size <= 8
         self.hf_config = AutoConfig.from_pretrained(self.model)
+        self.hf_config.torch_dtype = self.hf_config.torch_dtype or torch.bfloat16
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)
         # assert self.max_num_batched_tokens >= self.max_model_len
