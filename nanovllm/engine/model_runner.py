@@ -546,3 +546,7 @@ class ModelRunner:
         if hasattr(self.model, "capture_cudagraph") and config.schedule_mode == "staged-prefill":
             # 모델이 CUDA 그래프 캡처를 지원하는 경우 추가 캡처
             self.model.capture_cudagraph(max_bs=max_bs, max_num_blocks=max_num_blocks, num_stages=config.num_stages)
+
+        if hasattr(self.model, "capture_cudagraph_layers") and config.schedule_mode != "staged-prefill":
+            # 모델 레이어별 CUDA 그래프 캡처
+            self.model.capture_cudagraph_layers(max_num_batched_tokens=config.max_num_batched_tokens)

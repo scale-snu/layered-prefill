@@ -177,36 +177,36 @@ class Scheduler:
 
         return scheduled_seqs
 
-    def get_num_stages(self, num_batched_tokens: int) -> int:
+    def get_num_stages(self, num_attn_tokens: int) -> int:
         """
         현재 배치된 토큰 수에 따라 필요한 단계 수를 계산
         """
         if len(self.stage_queue) == 16:
-            if num_batched_tokens <= 512:
+            if num_attn_tokens <= 512 * 512:
                 return 1
-            elif num_batched_tokens <= 1024:
+            elif num_attn_tokens <= 1024 * 1024:
                 return 2
-            elif num_batched_tokens <= 2048:
+            elif num_attn_tokens <= 2048 * 2048:
                 return 4
-            elif num_batched_tokens <= 4096:
+            elif num_attn_tokens <= 4096 * 4096:
                 return 8
             else:
                 return 16
         elif len(self.stage_queue) == 4:
-            if num_batched_tokens <= 512:
+            if num_attn_tokens <= 512 * 512:
                 return 1
-            elif num_batched_tokens <= 2048:
+            elif num_attn_tokens <= 2048 * 2048:
                 return 2
             else:
                 return 4
         elif len(self.stage_queue) == 12:
-            if num_batched_tokens <= 512:
+            if num_attn_tokens <= 512 * 512:
                 return 1
-            elif num_batched_tokens <= 1024:
+            elif num_attn_tokens <= 1024 * 1024:
                 return 2
-            elif num_batched_tokens <= 2048:
+            elif num_attn_tokens <= 2048 * 2048:
                 return 4
-            elif num_batched_tokens <= 4096:
+            elif num_attn_tokens <= 4096 * 4096:
                 return 6
             else:
                 return 12
@@ -227,6 +227,7 @@ class Scheduler:
         decode_scheduled_seqs = []
         num_seqs = 0
         num_batched_tokens = 0
+        num_attn_tokens = 0
 
         # 1단계: 각 단계별 큐에서 하나씩 시퀀스 선택하여 처리
         # 각 단계에서 최대 하나의 시퀀스만 처리하여 메모리 사용량 제어
@@ -264,6 +265,7 @@ class Scheduler:
                 num_seqs += 1
                 seq.num_tokens_to_process = num_tokens_to_process
                 num_batched_tokens += num_tokens_to_process
+                num_attn_tokens += num_tokens_to_process * (seq.num_processed_tokens + num_tokens_to_process)
 
                 self.prefilling.popleft()
                 prefill_scheduled_seqs.append(seq)
@@ -288,6 +290,7 @@ class Scheduler:
                     num_seqs += 1
                     seq.num_tokens_to_process = num_tokens_to_process
                     num_batched_tokens += num_tokens_to_process
+                    num_attn_tokens += num_tokens_to_process * (seq.num_processed_tokens + num_tokens_to_process)
 
                     self.waiting.popleft()  # 대기 큐에서 제거
                     prefill_scheduled_seqs.append(seq)  # 처리할 시퀀스 목록에 추가
@@ -295,7 +298,7 @@ class Scheduler:
                     break
 
             for seq in prefill_scheduled_seqs:
-                seq.num_stages = self.get_num_stages(num_batched_tokens)
+                seq.num_stages = self.get_num_stages(num_attn_tokens)
 
         # 3단계: 디코딩 중인 시퀀스들 처리
         # 프롬프트 처리가 완료되어 디코딩 단계에 있는 시퀀스들 처리
@@ -334,7 +337,6 @@ class Scheduler:
         scheduled_seqs = prefill_scheduled_seqs + decode_scheduled_seqs
 
         return scheduled_seqs
-
 
     def preempt(self, seq: Sequence):
         """
