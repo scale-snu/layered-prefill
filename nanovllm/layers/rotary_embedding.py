@@ -2,18 +2,7 @@ from functools import lru_cache
 import torch
 from torch import nn
 
-
-def apply_rotary_emb(
-    x: torch.Tensor,
-    cos: torch.Tensor,
-    sin: torch.Tensor,
-) -> torch.Tensor:
-    cos = cos.unsqueeze(-2)
-    sin = sin.unsqueeze(-2)
-    x1, x2 = torch.chunk(x.to(torch.float32), 2, dim=-1)
-    y1 = x1 * cos - x2 * sin
-    y2 = x2 * cos + x1 * sin
-    return torch.cat((y1, y2), dim=-1).to(x.dtype)
+from nanovllm import pos_encoding_ops
 
 
 class RotaryEmbedding(nn.Module):
@@ -35,25 +24,25 @@ class RotaryEmbedding(nn.Module):
         sin = freqs.sin()
         cache = torch.cat((cos, sin), dim=-1)
         self.register_buffer("cos_sin_cache", cache, persistent=False)
+        self.is_neox_style = True
 
-    @torch.compile
     def forward(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        num_tokens = positions.size(0)
-        cos_sin = self.cos_sin_cache[positions]
-        cos, sin = cos_sin.chunk(2, dim=-1)
-        query_shape = query.shape
-        query = query.view(num_tokens, -1, self.head_size)
-        query = apply_rotary_emb(query, cos, sin).view(query_shape)
-        key_shape = key.shape
-        key = key.view(num_tokens, -1, self.head_size)
-        key = apply_rotary_emb(key, cos, sin).view(key_shape)
+        # pos_encoding_ops.rotary_embedding() is an in-place operation that
+        # updates the query and key tensors.
+        pos_encoding_ops.rotary_embedding(
+            positions,
+            query,
+            key,
+            self.head_size,
+            self.cos_sin_cache.to(query.dtype),
+            self.is_neox_style,
+        )
         return query, key
-
 
 @lru_cache(1)
 def get_rope(

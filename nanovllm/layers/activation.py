@@ -2,13 +2,18 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+from nanovllm import activation_ops
+
 
 class SiluAndMul(nn.Module):
 
     def __init__(self):
         super().__init__()
 
-    @torch.compile
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x, y = x.chunk(2, -1)
-        return F.silu(x) * y
+        assert x.ndim == 2, "Input tensor must be 2D"
+        num_tokens = x.shape[0]
+        d = x.shape[1] // 2
+        out = torch.empty(num_tokens, d, dtype=x.dtype, device=x.device)
+        activation_ops.silu_and_mul(out, x)
+        return out

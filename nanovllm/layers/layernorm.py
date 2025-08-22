@@ -1,6 +1,8 @@
 import torch
 from torch import nn
 
+from nanovllm import layernorm_ops
+
 
 class RMSNorm(nn.Module):
 
@@ -14,38 +16,19 @@ class RMSNorm(nn.Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(hidden_size))
 
-    @torch.compile
-    def rms_forward(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        orig_dtype = x.dtype
-        x = x.to(torch.float32)
-        var = x.pow(2).mean(dim=-1, keepdim=True)
-        x.mul_(torch.rsqrt(var + self.eps))
-        x = x.to(orig_dtype).mul_(self.weight)
-        return x
-
-    @torch.compile
-    def add_rms_forward(
-        self,
-        x: torch.Tensor,
-        residual: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        orig_dtype = x.dtype
-        x = x.to(torch.float32).add_(residual.to(torch.float32))
-        residual = x.to(orig_dtype)
-        var = x.pow(2).mean(dim=-1, keepdim=True)
-        x.mul_(torch.rsqrt(var + self.eps))
-        x = x.to(orig_dtype).mul_(self.weight)
-        return x, residual
-
     def forward(
         self,
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        shape = x.shape
+        x = x.reshape(-1, self.hidden_size)
+        out = torch.empty_like(x)
         if residual is None:
-            return self.rms_forward(x)
+            layernorm_ops.rms_norm(out, x, self.weight.data, self.eps)
+            return out.reshape(shape)
         else:
-            return self.add_rms_forward(x, residual)
+            x += residual
+            residual = x.clone()
+            layernorm_ops.rms_norm(out, x, self.weight.data, self.eps)
+            return out.reshape(shape), residual

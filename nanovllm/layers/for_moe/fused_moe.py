@@ -4,14 +4,70 @@
 import functools
 import json
 import os
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
 
 from nanovllm.layers.for_moe.moe_easy_kernel import topk_softmax, moe_sum, silu_and_mul, gelu_and_mul
-from nanovllm.layers.for_moe.moe_align_block_size import moe_align_block_size
+from nanovllm import moe_ops
+
+
+def moe_align_block_size(
+    topk_ids: torch.Tensor, block_size: int, num_experts: int
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Aligns the token distribution across experts to be compatible with block
+    size for matrix multiplication.
+
+    Parameters:
+    - topk_ids: A tensor of shape [total_tokens, top_k] representing the
+        top-k expert indices for each token.
+    - block_size: The block size used in block matrix multiplication.
+    - num_experts: The total number of experts.
+
+    Returns:
+    - sorted_token_ids: A tensor containing the sorted token indices according
+        to their allocated expert.
+    - expert_ids: A tensor indicating the assigned expert index for each block.
+    - num_tokens_post_padded: The total number of tokens after padding,
+        ensuring divisibility by block_size.
+
+    This function pads the number of tokens that each expert needs to process
+    so that it is divisible by block_size.
+    Padding ensures that during block matrix multiplication, the dimensions
+    align correctly.
+
+    Example:
+    Given topk_ids = [[2, 3, 4], [1, 2, 4], [1, 3, 4], [1, 2, 3]],
+    block_size = 4, and num_experts = 4:
+    - We initially have 12 tokens (after repeating 'top_k' times) and 4 experts,
+        with each expert needing to process 3 tokens.
+    - As block_size is 4, we pad 1 token for each expert.
+    - First, flatten topk_ids to [2, 3, 4, 1, 2, 4, 1, 3, 4, 1, 2, 3].
+    - Then append padding tokens [12, 12, 12, 12] for each block.
+    - After sorting by expert index, we obtain token_ids
+        [3, 6, 9, 12, 0, 4, 10, 12, 1, 7, 11, 12, 2, 5, 8, 12].
+        Tokens 12 are non-existent (padding) and are ignored in
+        the subsequent matrix multiplication.
+    - The padding ensures that the total number of tokens is now divisible
+        by block_size for proper block matrix operations.
+    """
+    max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
+    sorted_ids = torch.empty(
+        (max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device
+    )
+    sorted_ids.fill_(topk_ids.numel())
+    max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
+    expert_ids = torch.empty(
+        (max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device
+    )
+    num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
+    moe_ops.moe_align_block_size(
+        topk_ids, num_experts, block_size, sorted_ids, expert_ids, num_tokens_post_pad
+    )
+    return sorted_ids, expert_ids, num_tokens_post_pad
 
 
 @triton.jit
@@ -144,7 +200,7 @@ def fused_moe_kernel(
                              mask=token_mask,
                              other=0)
         accumulator = accumulator * moe_weight[:, None]
-    
+
     accumulator = accumulator.to(compute_type)
     # -----------------------------------------------------------
     # Write back the block of the output
@@ -313,45 +369,35 @@ def try_get_optimal_moe_config(
         }
     return config
 
+
 def fused_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
-    indices_type: Optional[torch.dtype] = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    assert hidden_states.size(0) == gating_output.size(0), (
-        "Number of tokens mismatch")
+):
+    assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
 
-    M, _ = hidden_states.size()
+    M, _ = hidden_states.shape
 
-    topk_weights = torch.empty(M,
-                               topk,
-                               dtype=torch.float32,
-                               device=hidden_states.device)
-    topk_ids = torch.empty(
-        M,
-        topk,
-        dtype=torch.int32 if indices_type is None else indices_type,
-        device=hidden_states.device)
-    token_expert_indices = torch.empty(M,
-                                       topk,
-                                       dtype=torch.int32,
-                                       device=hidden_states.device)
-
-    gating_output_float = gating_output.float()  # TODO(woosuk): Optimize this.
-
-    topk_softmax(
+    topk_weights = torch.empty(
+        M, topk, dtype=torch.float32, device=hidden_states.device
+    )
+    topk_ids = torch.empty(M, topk, dtype=torch.int32, device=hidden_states.device)
+    token_expert_indicies = torch.empty(
+        M, topk, dtype=torch.int32, device=hidden_states.device
+    )
+    moe_ops.topk_softmax(
         topk_weights,
         topk_ids,
-        token_expert_indices,
-        gating_output,
+        token_expert_indicies,
+        gating_output.float(),  # TODO(woosuk): Optimize this.
     )
+
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    return topk_weights, topk_ids, token_expert_indicies
 
-    return topk_weights, topk_ids, token_expert_indices
-    
 
 def fused_experts(hidden_states: torch.Tensor,
                   w1: torch.Tensor,
@@ -378,12 +424,12 @@ def fused_experts(hidden_states: torch.Tensor,
 
     if inplace:
         fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids, True,
-                       activation, apply_router_weight_on_input, 
+                       activation, apply_router_weight_on_input,
                        per_channel_quant, global_num_experts, expert_map,
                        w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
                        block_shape)
         return hidden_states
-    
+
     return fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids,
                               False, activation, apply_router_weight_on_input,
                               per_channel_quant,
@@ -504,7 +550,7 @@ def fused_experts_impl(
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
             moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
-                                 global_num_experts, expert_map))
+                                 global_num_experts))
 
         invoke_fused_moe_kernel(qcurr_hidden_states,
                                 w1,

@@ -1,34 +1,6 @@
 [build-system]
-requires = ["setuptools>=61"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "nano-vllm"
-version = "0.2.0"
-authors = [{ name = "Xingkai Yu" }]
-license = "MIT"
-license-files = ["LICENSE"]
-readme = "README.md"
-description = "a lightweight vLLM implementation built from scratch"
-requires-python = ">=3.9,<3.13"
-dependencies = [
+requires = [
+    "setuptools>=61",
     "torch>=2.4.0",
-    "triton>=3.0.0",
-    "transformers>=4.51.0",
-    "flash-attn",
-    "xxhash",
-    "aiohttp",
-    "fastapi",
-    "uvicorn",
-    "pandas",
-    "datasets",
-    "pillow",
-    "psutil",
 ]
-
-[project.urls]
-Homepage="https://github.com/GeeeekExplorer/nano-vllm"
-
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["nanovllm*"]
+build-backend = "setuptools.build_meta"

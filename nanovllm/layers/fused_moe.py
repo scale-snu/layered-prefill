@@ -170,6 +170,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
 
+        # print(f"[MoE] {topk_ids.unique().tolist()}")
+
         return self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -655,7 +657,6 @@ class FusedMoE(torch.nn.Module):
                 gating_output=router_logits,
                 topk=top_k,
                 renormalize=renormalize,
-                indices_type=indices_type,
             )
         else:
             topk_weights, topk_ids = custom_routing_function(
