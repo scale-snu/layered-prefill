@@ -10,7 +10,7 @@ import torch
 import triton
 import triton.language as tl
 
-from nanovllm.layers.for_moe.moe_easy_kernel import topk_softmax, moe_sum, silu_and_mul, gelu_and_mul
+from nanovllm.layers.for_moe.moe_easy_kernel import topk_softmax, moe_sum, silu_and_mul, gelu_and_mul, swigluoai
 from nanovllm import moe_ops
 
 
@@ -87,6 +87,7 @@ def fused_moe_kernel(
     a_ptr,
     b_ptr,
     c_ptr,
+    b_bias_ptr,
     a_scale_ptr,
     b_scale_ptr,
     topk_weights_ptr,
@@ -114,6 +115,8 @@ def fused_moe_kernel(
     stride_bse,
     stride_bsk,
     stride_bsn,
+    stride_bbe,  # bias expert stride
+    stride_bbn,  # bias N stride
     # Block size for block-wise quantization
     group_n: tl.constexpr,
     group_k: tl.constexpr,
@@ -126,6 +129,7 @@ def fused_moe_kernel(
     top_k: tl.constexpr,
     compute_type: tl.constexpr,
     per_channel_quant: tl.constexpr,
+    HAS_BIAS: tl.constexpr = 0,
 ):
     # -----------------------------------------------------------
     # Map program ids `pid` to the block of C it should compute.
@@ -173,6 +177,11 @@ def fused_moe_kernel(
     b_ptrs = b_ptr + off_experts * stride_be + (offs_k[:, None] * stride_bk +
                                                 offs_bn[None, :] * stride_bn)
 
+    if HAS_BIAS:
+        # bias shape: [num_experts, N]
+        bias_ptrs = b_bias_ptr + off_experts * stride_bbe + offs_bn * stride_bbn
+        bias = tl.load(bias_ptrs, mask=(offs_bn < N), other=0.0)
+
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
     # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
@@ -194,6 +203,9 @@ def fused_moe_kernel(
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
+
+    if HAS_BIAS:
+        accumulator = accumulator + bias[None, :]
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token,
@@ -226,7 +238,9 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
                             config: dict[str, Any],
                             compute_type: tl.dtype,
                             per_channel_quant: bool,
-                            block_shape: Optional[list[int]] = None) -> None:
+                            block_shape: Optional[list[int]] = None,
+                            B_bias: Optional[torch.Tensor] = None,
+                            ) -> None:
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
     assert sorted_token_ids.stride(0) == 1
@@ -234,9 +248,11 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
     assert A_scale is None
     assert B_scale is None
 
+
     M = A.size(0)
     num_tokens = M * top_k
 
+    HAS_BIAS = B_bias is not None
     EM = sorted_token_ids.size(0)
     if A.size(0) < config["BLOCK_SIZE_M"]:
         # optimize for small batch_size.
@@ -257,6 +273,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         A,
         B,
         C,
+        B_bias,
         A_scale,
         B_scale,
         topk_weights,
@@ -284,6 +301,8 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         if B_scale is not None and B_scale.ndim == 3 else 0,
         B_scale.stride(1)
         if B_scale is not None and B_scale.ndim >= 2 else 0,
+        B_bias.stride(0) if B_bias is not None else 0,
+        B_bias.stride(1) if B_bias is not None else 0,
         0 if block_shape is None else block_shape[0],
         0 if block_shape is None else block_shape[1],
         MUL_ROUTED_WEIGHT=mul_routed_weight,
@@ -291,6 +310,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         compute_type=compute_type,
         per_channel_quant=per_channel_quant,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
+        HAS_BIAS=1 if HAS_BIAS else 0,
         **config,
     )
 
@@ -402,6 +422,8 @@ def fused_topk(
 def fused_experts(hidden_states: torch.Tensor,
                   w1: torch.Tensor,
                   w2: torch.Tensor,
+                  w1_bias: Optional[torch.Tensor],
+                  w2_bias: Optional[torch.Tensor],
                   topk_weights: torch.Tensor,
                   topk_ids: torch.Tensor,
                   inplace: bool = False,
@@ -427,7 +449,7 @@ def fused_experts(hidden_states: torch.Tensor,
                        activation, apply_router_weight_on_input,
                        per_channel_quant, global_num_experts, expert_map,
                        w1_scale, w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
-                       block_shape)
+                       block_shape, w1_bias, w2_bias)
         return hidden_states
 
     return fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids,
@@ -435,7 +457,7 @@ def fused_experts(hidden_states: torch.Tensor,
                               per_channel_quant,
                               global_num_experts, expert_map, w1_scale,
                               w2_scale, w1_zp, w2_zp, a1_scale, a2_scale,
-                              block_shape)
+                              block_shape, w1_bias, w2_bias)
 def fused_experts_impl(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -455,6 +477,8 @@ def fused_experts_impl(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     block_shape: Optional[list[int]] = None,
+    w1_bias: Optional[torch.Tensor] = None,
+    w2_bias: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     # Check constraints.
     assert hidden_states.size(1) == w1.size(2), (
@@ -567,12 +591,16 @@ def fused_experts_impl(
                                 config,
                                 compute_type=compute_type,
                                 per_channel_quant=per_channel_quant,
-                                block_shape=block_shape)
+                                block_shape=block_shape,
+                                B_bias=w1_bias,
+                                )
 
         if activation == "silu":
             silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
         elif activation == "gelu":
             gelu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
+        elif activation == "swigluoai":
+            swigluoai(intermediate_cache2, intermediate_cache1.view(-1, N))
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
@@ -595,7 +623,9 @@ def fused_experts_impl(
                                 config,
                                 compute_type=compute_type,
                                 per_channel_quant=per_channel_quant,
-                                block_shape=block_shape)
+                                block_shape=block_shape,
+                                B_bias=w2_bias,
+                                )
 
         moe_sum(intermediate_cache3.view(*intermediate_cache3.size()),
                     out_hidden_states[begin_chunk_idx:end_chunk_idx])

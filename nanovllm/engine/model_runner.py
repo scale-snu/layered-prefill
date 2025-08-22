@@ -9,6 +9,7 @@ from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.models.qwen3_moe import Qwen3MoeForCausalLM
+from nanovllm.models.gpt_oss import GptOssForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
@@ -43,7 +44,7 @@ class ModelRunner:
 
         # 기본 dtype과 디바이스 설정 (모델 로딩을 위해)
         default_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(hf_config.torch_dtype)
+        torch.set_default_dtype(hf_config.torch_dtype if hf_config.torch_dtype else torch.bfloat16)
         torch.set_default_device("cuda")
 
         # 모델 아키텍처에 따라 적절한 모델 클래스 선택
@@ -51,6 +52,8 @@ class ModelRunner:
             self.model = Qwen3ForCausalLM(hf_config)
         elif hf_config.architectures[0] == "Qwen3MoeForCausalLM":
             self.model = Qwen3MoeForCausalLM(hf_config)
+        elif hf_config.architectures[0] == "GptOssForCausalLM":
+            self.model = GptOssForCausalLM(hf_config)
         else:
             raise ValueError(f"Unsupported model architecture: {hf_config.architectures[0]}")
 

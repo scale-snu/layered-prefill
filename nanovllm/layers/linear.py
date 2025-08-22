@@ -161,6 +161,10 @@ class RowParallelLinear(LinearBase):
             self.register_parameter("bias", None)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
+        if param is self.bias:
+            if dist.get_rank() == 0:
+                param.data.copy_(loaded_weight)
+            return
         param_data = param.data
         shard_size = param_data.size(self.tp_dim)
         start_idx = self.tp_rank * shard_size

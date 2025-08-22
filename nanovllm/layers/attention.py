@@ -108,7 +108,7 @@ class Attention(nn.Module):
         # KV 캐시 초기화 (빈 텐서로 시작)
         self.k_cache = self.v_cache = torch.tensor([])
 
-    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
+    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, sinks: None | torch.Tensor = None) -> torch.Tensor:
         """
         어텐션 계산 수행
 
@@ -159,7 +159,7 @@ class Attention(nn.Module):
                 v = v[:len_prefill]
 
             # Flash Attention을 사용한 PREFILLING 어텐션 계산
-            o = flash_attn_varlen_func(
+            o, lse, _ = flash_attn_varlen_func(
                 q[:len_prefill], k, v,
                 max_seqlen_q=context.max_seqlen_q,
                 cu_seqlens_q=context.cu_seqlens_q,
@@ -167,22 +167,36 @@ class Attention(nn.Module):
                 cu_seqlens_k=context.cu_seqlens_k,
                 softmax_scale=self.scale,
                 causal=True,
-                block_table=context.prefill_block_tables
+                block_table=context.prefill_block_tables,
+                return_attn_probs=True,
             )
+            if sinks is not None:
+                o_dtype = o.dtype
+                lse = lse.transpose(-2, -1).unsqueeze(dim=-1)
+
+                multiplier = 1 / (torch.exp(sinks.reshape(1, 1, -1, 1) - lse) + 1)
+                o = (o * multiplier).to(o_dtype)
             o = o.view(-1, self.num_heads * self.head_dim)
             os.append(o)
 
         # ===== DECODING 단계 처리 =====
         if context.decode_block_tables is not None:  # decoding
             # Flash Attention with KV Cache를 사용한 DECODING 어텐션 계산
-            o = flash_attn_with_kvcache(
+            o, lse = flash_attn_with_kvcache(
                 q[len_prefill:].unsqueeze(1),  # 마지막 토큰만 사용 (새로 생성된 토큰)
                 k_cache, v_cache,
                 cache_seqlens=context.context_lens,
                 block_table=context.decode_block_tables,
                 softmax_scale=self.scale,
-                causal=True
+                causal=True,
+                return_softmax_lse=True,
             )
+            if sinks is not None:
+                o_dtype = o.dtype
+                lse = lse.transpose(-2, -1).unsqueeze(dim=-1)
+
+                multiplier = 1 / (torch.exp(sinks.reshape(1, 1, -1, 1) - lse) + 1)
+                o = (o * multiplier).to(o_dtype)
             o = o.view(-1, self.num_heads * self.head_dim)
             os.append(o)
 

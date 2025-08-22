@@ -114,7 +114,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
-                       params_dtype: torch.dtype, **extra_weight_attrs):
+                       params_dtype: torch.dtype,
+                       has_bias: bool = False,
+                       **extra_weight_attrs):
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(torch.empty(
             num_experts,
@@ -124,6 +126,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
                                         requires_grad=False)
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
+        if has_bias:
+            w13_bias = torch.nn.Parameter(torch.zeros(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                dtype=params_dtype),
+                                          requires_grad=False)
+            layer.register_parameter("w13_bias", w13_bias)
+            set_weight_attrs(w13_bias, extra_weight_attrs)
 
         # down_proj (row parallel)
         w2_weight = torch.nn.Parameter(torch.empty(
@@ -134,6 +144,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
                                        requires_grad=False)
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
+        if has_bias:
+            w2_bias = torch.nn.Parameter(torch.zeros(num_experts,
+                                                     hidden_size,
+                                                     dtype=params_dtype),
+                                         requires_grad=False)
+            layer.register_parameter("w2_bias", w2_bias)
+            set_weight_attrs(w2_bias, extra_weight_attrs)
 
     def apply(
         self,
@@ -176,6 +193,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
+                w1_bias=layer.w13_bias if hasattr(layer, "w13_bias") else None,
+                w2_bias=layer.w2_bias if hasattr(layer, "w2_bias") else None,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 inplace=True,
@@ -209,6 +228,7 @@ class FusedMoE(torch.nn.Module):
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
         num_redundant_experts: int = 0,
+        has_bias=False,
     ):
         super().__init__()
         if params_dtype is None:
@@ -279,6 +299,7 @@ class FusedMoE(torch.nn.Module):
             self.intermediate_size_per_partition,
             "params_dtype": params_dtype,
             "weight_loader": self.weight_loader,
+            "has_bias": has_bias,
         }
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
@@ -436,6 +457,16 @@ class FusedMoE(torch.nn.Module):
                       shard_id: str,
                       expert_id: int,
                       return_success: bool = False) -> Optional[bool]:
+        if shard_id == "all":
+            # (FIXME) for gpt-oss all experts are combined
+            if "bias" in weight_name:
+                param.data.copy_(loaded_weight)
+            else:
+                param_shape = param.data.shape
+                loaded_weight = loaded_weight.reshape(*param_shape[:-1], -1)
+                param.data.copy_(loaded_weight)
+            return True if return_success else None
+
         expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
         if expert_id == -1:
             # Failed to load this param since it's not local to this rank
@@ -444,8 +475,8 @@ class FusedMoE(torch.nn.Module):
 
         quant_method_name = self.quant_method.__class__.__name__
 
-        if shard_id not in ("w1", "w2", "w3"):
-            raise ValueError(f"shard_id must be ['w1','w2','w3'] but "
+        if shard_id not in ("w1", "w2", "w3", "all"):
+            raise ValueError(f"shard_id must be ['w1','w2','w3', 'all'] but "
                              f"got {shard_id}.")
 
         WEIGHT_SCALE_SUPPORTED = [

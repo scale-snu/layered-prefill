@@ -89,6 +89,7 @@ class Qwen3Attention(nn.Module):
             max_position=max_position,
             base=rope_theta,
             rope_scaling=rope_scaling,
+            is_neox_style=True,
         )
 
         # 어텐션 계산 (Flash Attention 사용)

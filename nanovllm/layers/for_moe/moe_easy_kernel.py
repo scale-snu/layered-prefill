@@ -43,10 +43,10 @@ def silu_and_mul(out: torch.Tensor, input: torch.Tensor):
     x = input[:, :d]
     y = input[:, d:]
     # silu(x) = x * sigmoid(x)
-    torch.mul(x * torch.sigmoid(x), y, out=out) 
+    torch.mul(x * torch.sigmoid(x), y, out=out)
 
 # silu and mul is appropriate to use triton kernel than topk_softmax and moe_sum
-# however I use pytorch-based kernel now for simplicity 
+# however I use pytorch-based kernel now for simplicity
 @triton.jit
 def silu_and_mul_kernel(
     input_ptr,  # [num_tokens, 2*d]
@@ -102,7 +102,7 @@ def gelu_and_mul(out: torch.Tensor, x: torch.Tensor):
     out.copy_(gelu_x0 * x1)
 
 # gelu and mul is appropriate to use triton kernel than topk_softmax and moe_sum
-# however I use pytorch-based kernel now for simplicity 
+# however I use pytorch-based kernel now for simplicity
 @triton.jit
 def gelu_and_mul_kernel(
     x_ptr,         # input: [num_tokens, 2 * d]
@@ -147,3 +147,16 @@ def gelu_and_mul_triton(out: torch.Tensor, x: torch.Tensor):
         out.stride(0), out.stride(1),
         BLOCK_SIZE
     )
+
+def swigluoai(out: torch.Tensor, x: torch.Tensor, alpha: float = 1.702, limit: float = 7.0):
+    """
+    out: (num_tokens, d)
+    x: (num_tokens, 2 * d)
+    """
+
+    gate, up = x[..., ::2], x[..., 1::2]
+    gate = gate.clamp(min=None, max=limit)
+    up = up.clamp(min=-limit, max=limit)
+    glu = gate * torch.sigmoid(gate * alpha)
+    gated_output = (up + 1) * glu
+    out.copy_(gated_output)

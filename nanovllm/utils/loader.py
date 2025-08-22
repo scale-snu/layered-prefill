@@ -35,14 +35,34 @@ def find_fused_moe_layer(model, layer_idx):
     return None
 
 # MoE expert 파라미터 패턴: model.layers.<layer_idx>.mlp.experts.<expert_id>.<proj>.weight
-moe_expert_pattern = re.compile(r"model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(down_proj|up_proj|gate_proj)\.weight")
+moe_expert_pattern = re.compile(
+    r"^model\.layers\.(\d+)\.mlp\.experts(?:\.(\d+))?\."
+    r"(down_proj|up_proj|gate_proj|down_proj_bias|gate_up_proj_bias|gate_up_proj_blocks|down_proj_blocks)(?:\.weight)?$"
+)
+
 
 # proj -> (param_name, shard_id) 매핑
 proj_to_param_shard = {
     "down_proj": ("w2_weight", "w2"),
     "gate_proj": ("w13_weight", "w1"),
     "up_proj":   ("w13_weight", "w3"),
+    "gate_up_proj_bias": ("w13_bias", "all"),
+    "down_proj_bias": ("w2_bias", "all"),
+    "gate_up_proj_blocks": ("w13_weight", "all"),
+    "down_proj_blocks": ("w2_weight", "all"),
 }
+
+def _dequant_mxfp4(x: torch.Tensor, scale: torch.Tensor,
+                float_dtype: torch.dtype) -> torch.Tensor:
+    try:
+        from quark.torch.kernel import mx
+    except ImportError as err:
+        raise ImportError("The package `amd-quark` is required to use "
+                        "MX-FP4 models. Please install it with `pip install "
+                        "amd-quark`.") from err
+
+    return mx.dq_mxfp4(x, scale, float_dtype)
+
 
 def load_model(model: nn.Module, path: str):
     packed_modules_mapping = getattr(model, "packed_modules_mapping", {})
@@ -53,15 +73,23 @@ def load_model(model: nn.Module, path: str):
                 m = moe_expert_pattern.fullmatch(weight_name)
                 if m:
                     layer_idx = int(m.group(1))
-                    expert_id = int(m.group(2))
+                    expert_id = int(m.group(2)) if m.group(2) else 0
                     proj = m.group(3)
                     param_name, shard_id = proj_to_param_shard[proj]
+                    scale = None
+                    if proj in ["gate_up_proj_blocks", "down_proj_blocks"]:
+                        scale_name = f"model.layers.{layer_idx}.mlp.experts.{proj.replace('_blocks', '_scales')}"
+                        scale = f.get_tensor(scale_name)
+
                     # 실제 파라미터 이름: model.layers.<layer_idx>.mlp.experts.<param_name>
                     param_path = f"model.layers.{layer_idx}.mlp.experts.{param_name}"
                     moe_layer = find_fused_moe_layer(model, layer_idx)
                     assert moe_layer is not None, f"FusedMoE layer not found for layer index {layer_idx}"
                     param = model.get_parameter(param_path)
-                    moe_layer.weight_loader(param, f.get_tensor(weight_name), weight_name, shard_id, expert_id)
+                    loaded_weight = f.get_tensor(weight_name)
+                    if scale is not None:
+                        loaded_weight = _dequant_mxfp4(loaded_weight, scale, param.dtype)
+                    moe_layer.weight_loader(param, loaded_weight, weight_name, shard_id, expert_id)
                     continue
                 # 2. 기존 packed_modules_mapping 처리
                 for k in packed_modules_mapping:
