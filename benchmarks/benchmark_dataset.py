@@ -303,6 +303,19 @@ class RandomDataset(BenchmarkDataset):
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
+        import datasets
+        self.data = datasets.load_dataset(
+            "Aeala/ShareGPT_Vicuna_unfiltered",
+            data_files={
+                "valid": "ShareGPT_V4.3_unfiltered_cleaned_split.json",
+            },
+            split="valid",
+        )
+        self.data = "\n".join([
+            "\n".join(msg["value"] for msg in entry["conversations"])
+            for entry in self.data
+            if "conversations" in entry and len(entry["conversations"]) >= 2
+        ])
 
     def sample(
         self,
@@ -323,12 +336,6 @@ class RandomDataset(BenchmarkDataset):
         num_special_tokens = tokenizer.num_special_tokens_to_add()
         real_input_len = input_len - num_special_tokens
 
-        prefix_token_ids = (
-            np.random.randint(0, vocab_size, size=prefix_len).tolist()
-            if prefix_len > 0
-            else []
-        )
-
         # New sampling logic: [X * (1 - b), X * (1 + b)]
         input_low = int(real_input_len * (1 - range_ratio))
         input_high = int(real_input_len * (1 + range_ratio))
@@ -339,26 +346,24 @@ class RandomDataset(BenchmarkDataset):
         logger.info("Sampling input_len from [%s, %s]", input_low, input_high)
         logger.info("Sampling output_len from [%s, %s]", output_low, output_high)
 
-        input_lens = np.random.randint(input_low, input_high + 1, size=num_requests)
+        input_lens = prefix_len + np.random.randint(input_low, input_high + 1, size=num_requests)
         output_lens = np.random.randint(output_low, output_high + 1, size=num_requests)
-        offsets = np.random.randint(0, vocab_size, size=num_requests)
+
+        chunk_start = 0
+        chunk_size = 4096
+        data = []
+        while len(data) < input_lens.sum():
+            input_ids = tokenizer(self.data[chunk_start:chunk_start+chunk_size]).input_ids
+            chunk_start += chunk_size
+            data.extend(input_ids)
 
         requests = []
+        start_idx = 0
         for i in range(num_requests):
-            inner_seq = (
-                (offsets[i] + i + np.arange(input_lens[i])) % vocab_size
-            ).tolist()
-            token_sequence = prefix_token_ids + inner_seq
+            token_sequence = data[start_idx:start_idx + input_lens[i]]
+            start_idx += input_lens[i]
             prompt = tokenizer.decode(token_sequence)
-            # After decoding the prompt we have to encode and decode it again.
-            # This is done because in some cases N consecutive tokens
-            # give a string tokenized into != N number of tokens.
-            # For example for GPT2Tokenizer:
-            # [6880, 6881] -> ['Ġcalls', 'here'] ->
-            # [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
-            # To avoid uncontrolled change of the prompt length,
-            # the encoded sequence is truncated before being decode again.
-            total_input_len = prefix_len + int(input_lens[i])
+            total_input_len = int(input_lens[i])
             re_encoded_sequence = tokenizer.encode(prompt, add_special_tokens=False)[
                 :total_input_len
             ]

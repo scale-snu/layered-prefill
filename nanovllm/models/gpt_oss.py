@@ -113,7 +113,7 @@ class GptOssAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(position_ids, q, k)
         v = v.contiguous()
-        attn_output = self.attn(q, k, v, self.sinks.data)
+        attn_output = self.attn(q, k, v, self.sinks.data.float())
         output = self.o_proj(attn_output)
 
         return output
@@ -178,6 +178,7 @@ class GptOssDecoderLayer(nn.Module):
         self.mlp = GptOssMLP(config)
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.is_graph_captured = False
 
     def forward(
         self,
@@ -201,6 +202,112 @@ class GptOssDecoderLayer(nn.Module):
         hidden_states = residual + hidden_states
         return hidden_states, 0
 
+    def _pre_forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, residual: torch.Tensor | None):
+
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+
+        qkv = self.self_attn.qkv(hidden_states)
+        q, k, v = qkv.split([self.self_attn.q_size, self.self_attn.kv_size, self.self_attn.kv_size], dim=-1)
+        q, k = self.self_attn.rotary_emb(positions, q, k)
+
+        return residual, q, k, v
+
+    def _post_forward(self, hidden_states: torch.Tensor, residual: torch.Tensor | None):
+        hidden_states = self.self_attn.o_proj(hidden_states)
+
+        hidden_states = hidden_states + residual
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = hidden_states + residual
+        return hidden_states, 0
+
+
+    def capture_cudagraph(self, layer_idx: int = 0, max_num_batched_tokens: int = 1024, graph_vars: dict = None):
+        self.is_graph_captured = True
+
+        self.graph_vars = graph_vars
+        hidden_states = graph_vars["hidden_states"]
+        residual = graph_vars["residual"]
+        positions = graph_vars["positions"]
+        attn_o = graph_vars["attn_o"]
+        outputs_hidden_states = graph_vars["outputs_hidden_states"]
+        outputs_residual = graph_vars["outputs_residual"]
+        outputs_q = graph_vars["outputs_q"]
+        outputs_k = graph_vars["outputs_k"]
+        outputs_v = graph_vars["outputs_v"]
+
+        self.graph_bs = []
+        bs = 512
+        while bs <= min(max_num_batched_tokens, 512):
+            self.graph_bs.append(bs)
+            bs = bs * 2
+        self.pre_graphs = {}
+        self.post_graphs = {}
+        self.pre_graph_pool = None
+        self.post_graph_pool = None
+
+        for bs in reversed(self.graph_bs):
+            pre_graph = torch.cuda.CUDAGraph()
+
+            _positions = positions[:bs].clone()
+            _hidden_states = hidden_states[:bs].clone()
+            if layer_idx == 0:
+                _residual = None
+            else:
+                _residual = residual[:bs].clone()
+
+            _ = self._pre_forward(_positions, _hidden_states, _residual)
+
+            # 그래프 캡쳐
+            with torch.cuda.graph(pre_graph, self.pre_graph_pool):
+                _positions = positions[:bs].clone()
+                _hidden_states = hidden_states[:bs].clone()
+                if layer_idx == 0:
+                    _residual = None
+                else:
+                    _residual = residual[:bs].clone()
+
+                _residual, _q, _k, _v = self._pre_forward(_positions, _hidden_states, _residual)
+
+                # 출력 저장
+                outputs_q[:bs] = _q
+                outputs_k[:bs] = _k
+                outputs_v[:bs] = _v
+                outputs_residual[:bs] = _residual
+
+            post_graph = torch.cuda.CUDAGraph()
+
+            _positions = positions[:bs].clone()
+            _attn_o = attn_o[:bs].clone()
+            _residual = residual[:bs].clone()
+
+            _ = self._post_forward(_attn_o, _residual)
+
+            with torch.cuda.graph(post_graph, self.post_graph_pool):
+                _positions = positions[:bs].clone()
+                _attn_o = attn_o[:bs].clone()
+                _residual = residual[:bs].clone()
+
+                _hidden_states, _residual = self._post_forward(_attn_o, _residual)
+
+                outputs_hidden_states[:bs] = _hidden_states
+                outputs_residual[:bs] = _residual
+
+            # 그래프 저장
+            if self.pre_graph_pool is None:
+                self.pre_graph_pool = pre_graph.pool()
+            if self.post_graph_pool is None:
+                self.post_graph_pool = post_graph.pool()
+
+            self.pre_graphs[bs] = pre_graph
+            self.post_graphs[bs] = post_graph
+
+            torch.cuda.synchronize()
+
+        print(f"Captured {len(self.pre_graphs) + len(self.post_graphs)} CUDA graphs for layer {layer_idx}.")
+
 
 class GptOssModel(nn.Module):
 
@@ -222,6 +329,9 @@ class GptOssModel(nn.Module):
             ) for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        self.is_graph_captured = False
+        self.num_stages = -1
 
     def forward(
         self,
@@ -479,6 +589,182 @@ class GptOssModel(nn.Module):
             hidden_states, residual = self.norm(hidden_states, residual)
 
         return hidden_states, residual
+
+    def capture_cudagraph_layers(self, max_num_batched_tokens: int = 1024):
+        """
+        CUDA 그래프 캡처
+
+        Staged-Prefill 모드에서 각 레이어의 CUDA 그래프를 캡처합니다.
+        """
+
+        hidden_size = self.embed_tokens.weight.size(1)
+
+        hidden_states = torch.zeros(max_num_batched_tokens, hidden_size)
+        residual = torch.zeros(max_num_batched_tokens, hidden_size)
+        positions = torch.zeros(max_num_batched_tokens, dtype=torch.int64)
+        attn_o = torch.zeros(max_num_batched_tokens, self.layers[0].self_attn.total_num_heads * self.layers[0].self_attn.head_dim)
+        outputs_hidden_states = torch.zeros(max_num_batched_tokens, hidden_size)
+        outputs_residual = torch.zeros(max_num_batched_tokens, hidden_size)
+        outputs_q = torch.zeros(max_num_batched_tokens, self.layers[0].self_attn.q_size)
+        outputs_k = torch.zeros(max_num_batched_tokens, self.layers[0].self_attn.kv_size)
+        outputs_v = torch.zeros(max_num_batched_tokens, self.layers[0].self_attn.kv_size)
+
+        graph_vars = dict(
+            hidden_states=hidden_states,
+            residual=residual,
+            positions=positions,
+            attn_o=attn_o,
+            outputs_hidden_states=outputs_hidden_states,
+            outputs_residual=outputs_residual,
+            outputs_q=outputs_q,
+            outputs_k=outputs_k,
+            outputs_v=outputs_v,
+        )
+
+        for layer_idx, layer in enumerate(self.layers):
+            layer.capture_cudagraph(layer_idx, max_num_batched_tokens, graph_vars)
+
+    def capture_cudagraph(self, max_bs: int = 1, max_num_blocks: int = 1, num_stages: int = 1):
+        """
+        CUDA 그래프 캡처
+
+        Staged-Prefill 모드에서 CUDA 그래프를 캡처합니다.
+        """
+
+        self.is_graph_captured = True
+
+        self.num_stages = num_stages
+
+        hidden_size = self.embed_tokens.weight.size(1)
+
+        hidden_states = torch.zeros(max_bs, hidden_size)
+        residual = torch.zeros(max_bs, hidden_size)
+        positions = torch.zeros(max_bs, dtype=torch.int64)
+        slot_mapping = torch.zeros(max_bs, dtype=torch.int32)
+        context_lens = torch.zeros(max_bs, dtype=torch.int32)
+        block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
+        outputs_hidden_states = torch.zeros(max_bs, hidden_size)
+        outputs_residual = torch.zeros(max_bs, hidden_size)
+
+        self.graph_bs = list(range(1, 16)) + list(range(16, max_bs + 1, 8))
+        self.pre_graphs = {}
+        self.post_graphs = {}
+        self.graph_pool = None
+
+        for ith_stage in range(num_stages):
+            pre_layer_idices = list(np.concatenate(np.array_split(np.arange(len(self.layers)), num_stages)[:ith_stage])) if ith_stage > 0 else []
+            post_layer_idices = list(np.concatenate(np.array_split(np.arange(len(self.layers)), num_stages)[ith_stage:]))
+
+            if len(pre_layer_idices) > 0:
+                for bs in reversed(self.graph_bs):
+                    set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], decode_block_tables=block_tables[:bs])
+
+                    graph = torch.cuda.CUDAGraph()
+
+                    # 워밍업 실행
+                    _positions = positions[:bs].clone()
+                    _hidden_states = hidden_states[:bs].clone()
+                    _residual = residual[:bs].clone()
+
+                    for layer_idx in pre_layer_idices:
+                        layer = self.layers[layer_idx]
+                        if layer_idx == 0:
+                            # 첫 번째 단계에서는 입력을 받음
+                            _hidden_states, _residual = layer(_positions, _hidden_states, None)
+                        else:
+                            # 이후 단계에서는 이전 단계의 출력과 잔차를 사용
+                            _hidden_states, _residual = layer(_positions, _hidden_states, _residual)
+
+                    outputs_hidden_states[:bs] = _hidden_states
+                    outputs_residual[:bs] = _residual
+
+                    # 그래프 캡쳐
+                    with torch.cuda.graph(graph, self.graph_pool):
+                        _positions = positions[:bs].clone()
+                        _hidden_states = hidden_states[:bs].clone()
+                        _residual = residual[:bs].clone()
+                        for layer_idx in pre_layer_idices:
+                            layer = self.layers[layer_idx]
+                            if layer_idx == 0:
+                                # 첫 번째 단계에서는 입력을 받음
+                                _hidden_states, _residual = layer(_positions, _hidden_states, None)
+                            else:
+                                # 이후 단계에서는 이전 단계의 출력과 잔차를 사용
+                                _hidden_states, _residual = layer(_positions, _hidden_states, _residual)
+
+                        outputs_hidden_states[:bs] = _hidden_states
+                        outputs_residual[:bs] = _residual
+
+                    # 그래프 저장
+                    if self.graph_pool is None:
+                        self.graph_pool = graph.pool()
+
+                    self.pre_graphs[(tuple(pre_layer_idices), bs)] = graph
+
+            if len(post_layer_idices) > 0:
+                for bs in reversed(self.graph_bs):
+                    set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], decode_block_tables=block_tables[:bs])
+
+                    graph = torch.cuda.CUDAGraph()
+
+                    # 워밍업 실행
+                    _positions = positions[:bs].clone()
+                    _hidden_states = hidden_states[:bs].clone()
+                    _residual = residual[:bs].clone()
+
+                    for layer_idx in post_layer_idices:
+                        layer = self.layers[layer_idx]
+                        if layer_idx == 0:
+                            # 첫 번째 단계에서는 입력을 받음
+                            _hidden_states, _residual = layer(_positions, _hidden_states, None)
+                        else:
+                            # 이후 단계에서는 이전 단계의 출력과 잔차를 사용
+                            _hidden_states, _residual = layer(_positions, _hidden_states, _residual)
+
+                    outputs_hidden_states[:bs] = _hidden_states
+                    outputs_residual[:bs] = _residual
+
+                    # 그래프 캡쳐
+                    with torch.cuda.graph(graph, self.graph_pool):
+                        _positions = positions[:bs].clone()
+                        _hidden_states = hidden_states[:bs].clone()
+                        _residual = residual[:bs].clone()
+                        for layer_idx in post_layer_idices:
+                            layer = self.layers[layer_idx]
+                            if layer_idx == 0:
+                                # 첫 번째 단계에서는 입력을 받음
+                                _hidden_states, _residual = layer(_positions, _hidden_states, None)
+                            else:
+                                # 이후 단계에서는 이전 단계의 출력과 잔차를 사용
+                                _hidden_states, _residual = layer(_positions, _hidden_states, _residual)
+
+                        outputs_hidden_states[:bs] = _hidden_states
+                        outputs_residual[:bs] = _residual
+
+                    # 그래프 저장
+                    if self.graph_pool is None:
+                        self.graph_pool = graph.pool()
+
+                    self.post_graphs[(tuple(post_layer_idices), bs)] = graph
+
+                print(ith_stage)
+
+            torch.cuda.synchronize()
+
+            reset_context()
+
+        self.graph_vars = dict(
+            hidden_states=hidden_states,
+            residual=residual,
+            positions=positions,
+            slot_mapping=slot_mapping,
+            context_lens=context_lens,
+            block_tables=block_tables,
+            outputs_hidden_states=outputs_hidden_states,
+            outputs_residual=outputs_residual,
+        )
+
+        print(f"Captured {len(self.pre_graphs) + len(self.post_graphs)} CUDA graphs for Staged-Prefill mode with {num_stages} stages.")
 
 
 class GptOssForCausalLM(nn.Module):

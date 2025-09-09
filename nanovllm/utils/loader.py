@@ -88,6 +88,10 @@ def load_model(model: nn.Module, path: str):
                     param = model.get_parameter(param_path)
                     loaded_weight = f.get_tensor(weight_name)
                     if scale is not None:
+                        loaded_weight = loaded_weight.cuda()
+                        scale = scale.cuda()
+                        if scale.ndim + 1 == loaded_weight.ndim:
+                            scale = scale.unsqueeze(-1)
                         loaded_weight = _dequant_mxfp4(loaded_weight, scale, param.dtype)
                     moe_layer.weight_loader(param, loaded_weight, weight_name, shard_id, expert_id)
                     continue

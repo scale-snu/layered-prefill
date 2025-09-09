@@ -9,11 +9,16 @@ import json
 import uuid
 from typing import AsyncGenerator
 
+import torch
+from zeus.monitor import ZeusMonitor
+
 from nanovllm.sampling_params import SamplingParams
 from nanovllm.engine.async_llm_engine import AsyncLLMEngine
 from nanovllm.entrypoints.config import APIServerConfig
 
+CONDA_PREFIX = os.environ.get("CONDA_PREFIX", "")
 GPU_ID = int(os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0])
+ENV = r"""TORCH_CUDA_ARCH_LIST="8.0;9.0" PATH=$PATH:{conda_prefix}/nvvm/bin CUDA_HOME={conda_prefix}/targets/x86_64-linux CUDA_VISIBLE_DEVICES={gpu_id}""".format(conda_prefix=CONDA_PREFIX, gpu_id=GPU_ID)
 
 
 def find_free_port():
@@ -73,8 +78,13 @@ def run_command(command):
 if __name__ == "__main__":
     server_configs = {
         "models": [
-            "/data/cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/9c925d64d72725edaf899c6cb9c377fd0709d9c5/",
+            # "/data/cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/9c925d64d72725edaf899c6cb9c377fd0709d9c5/",
             # "/data/cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B/snapshots/ae659febe817e4b3ebd7355f47792725801204c9/",
+            # "/data/cache/huggingface/hub/models--openai--gpt-oss-20b/snapshots/d666cf3b67006cf8227666739edf25164aaffdeb/",
+
+            # "/home/gunjunlee/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218/",
+            "/home/gunjunlee/.cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39/",
+            # "/home/gunjunlee/.cache/huggingface/hub/models--openai--gpt-oss-20b/snapshots/6cee5e81ee83917806bbde320786a8fb61efebee/",
         ],
         # "max_num_batched_tokens": [128, 256, 512, 1024, 2048, 16384],
         # "max_num_batched_tokens": [4096],
@@ -82,11 +92,14 @@ if __name__ == "__main__":
         # "max_num_batched_tokens": [256],
         # "max_num_batched_tokens": [16384],
         # "max_num_batched_tokens": [2048],
-        "max_num_batched_tokens": [2048],
         # "max_num_batched_tokens": [512],
-        "max_num_seqs": [64],
+        "max_num_batched_tokens": [8192],
+        # "max_num_batched_tokens": [6144],
+        "max_num_seqs": [32],
+        # "max_num_seqs": [128],
         "max_model_len": [32768],
-        "gpu_memory_utilization": [0.9],
+        # "gpu_memory_utilization": [0.9],
+        "gpu_memory_utilization": [0.85],
         "tensor_parallel_size": [1],
         "enforce_eager": [False],
         "log_level": ["debug"],
@@ -100,30 +113,42 @@ if __name__ == "__main__":
         # "num_stages": [1],
         # "num_stages": [4],
         # "num_stages": [8],
-        "num_stages": [12],
-        # "num_stages": [16],
+        # "num_stages": [12],
+        # "num_stages": [24],
+        "num_stages": [16],
     }
     request_configs = {
         # "datasets": [("random", 1024, 128), ("random", 16384, 128), ("sharegpt", -1, None), ("arxiv", -1, None), ("longbench", -1, 8192)],
         "datasets": [("sharegpt", -1, None)],
         # "datasets": [("arxiv", -1, None)],
         # "datasets": [("longbench", -1, 8192)],
-        # "request_rate": [0.1, 0.125, 0.15, 0.175, 0.2, 0.225, 0.25, 0.275, 0.3, 0.4, 0.5, 0.6, 1, 1.2, 1.3, 1.5, 1.7, 1.8, 2, 2.5, 3, 3.5, 4, 4.5, 5],
-        # "request_rate": [0.1, 0.125, 0.15, 0.175, 0.2, 0.225, 0.25, 0.275, 0.3, 0.4, 0.5, 0.6, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5],
-        # "request_rate": [1, 1.1, 1.2, 1.3, 1.4, 1.5],  # Moe sharegpt request rate
-        # "request_rate": [0.1, 0.125, 0.15, 0.175, 0.2, 0.225, 0.25, 0.275, 0.3],  # Moe longbench request rate
-        # "request_rate": [0.1, 0.125, 0.15, 0.175, 0.2],  # Moe longbench request rate
-        # "request_rate": [0.225, 0.25, 0.275, 0.3],  # Moe longbench request rate
+        # A100
+        # "request_rate": [1, 1.1, 1.2, 1.3, 1.4, 1.5],  # Qwen Moe sharegpt request rate
+        # "request_rate": [1, 1.25, 1.5, 1.75, 2.0],  # GPT Moe sharegpt request rate
+        # "request_rate": [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.50],  # Qwen Moe arxiv request rate
+        # "request_rate": [0.4, 0.5, 0.6, 0.7, 0.8],  # GPT Moe arxiv request rate
+        # "request_rate": [0.1, 0.125, 0.15, 0.175, 0.2, 0.225, 0.25, 0.275, 0.3],  # Qwen Moe longbench request rate
+        # "request_rate": [0.1, 0.11, 0.12, 0.13, 0.14, 0.15],  # GPT Moe longbench request rate
+        # H100
+        "request_rate": [1, 1.2, 1.4, 1.6, 1.8, 2.0],  # Qwen Moe sharegpt request rate
+        # "request_rate": [1, 1.5, 2.0, 2.5, 3.0],  # GPT Moe sharegpt request rate
+        # "request_rate": [0.4, 0.5, 0.6, 0.7, 0.8],  # Qwen Moe arxiv request rate
+        # "request_rate": [0.7, 0.8, 0.9, 1.0, 1.1],  # GPT Moe arxiv request rate
+        # "request_rate": [0.1, 0.2, 0.3, 0.4, 0.5],  # Qwen Moe longbench request rate
+        # "request_rate": [0.1, 0.15, 0.20, 0.25, 0.30],  # GPT Moe longbench request rate
         # "request_rate": [1],  # Moe sharegpt ttft-tbt
         # "request_rate": [0.15],  # Moe longbench ttft-tbt
         # "request_rate": [1, 1.5, 2.0, 2.5, 3.0],  # Non-moe sharegpt request rate
-        "request_rate": [1, 1.25, 1.5, 1.75, 2.0],  # Non-moe sharegpt request rate (new)
+        # "request_rate": [1, 1.25, 1.5, 1.75, 2.0],  # Non-moe sharegpt request rate (new)
         # "request_rate": [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4],  # Non-moe longbench request rate
+        # "request_rate": [0.2, 0.25, 0.3, 0.35, 0.4],  # Non-moe longbench request rate
         # "request_rate": [2.0],  # Non-moe sharegpt ttft-tbt
         "num_requests": [600],
     }
     MAX_TIME = 600
     WARMUP_TIME = 60
+
+    monitor = ZeusMonitor(gpu_indices=[0])
 
     for model, max_num_batched_tokens, max_num_seqs, max_model_len, gpu_memory_utilization, tensor_parallel_size, enforce_eager, log_level, host, schedule_mode, num_stages in itertools.product(
         server_configs["models"],
@@ -141,10 +166,10 @@ if __name__ == "__main__":
         if schedule_mode == "chunked-prefill":
             if num_stages != 1:
                 continue
-            if max_num_batched_tokens == 2048:
+            if max_num_batched_tokens == 8192:
                 continue
         elif schedule_mode == "staged-prefill":
-            if max_num_batched_tokens != 2048:
+            if max_num_batched_tokens != 8192:
                 continue
 
         port = find_free_port()
@@ -152,7 +177,7 @@ if __name__ == "__main__":
 
         print(f"Running benchmark with config: {model}, {max_num_batched_tokens}, {max_num_seqs}, {max_model_len}, {gpu_memory_utilization}, {tensor_parallel_size}, {enforce_eager}, {log_level}, {host}, {port}, {nccl_port}, {schedule_mode}, {num_stages}")
 
-        server_command = f"python -m nanovllm.entrypoints.api_server --model {model} --max-num-batched-tokens {max_num_batched_tokens} --max-num-seqs {max_num_seqs} --max-model-len {max_model_len} --gpu-memory-utilization {gpu_memory_utilization} --tensor-parallel-size {tensor_parallel_size} {'--enforce-eager' if enforce_eager else ''} --log-level {log_level} --host {host} --port {port} --nccl-port {nccl_port} --schedule-mode {schedule_mode} --num-stages {num_stages}"
+        server_command = f"{ENV} python -m nanovllm.entrypoints.api_server --model {model} --max-num-batched-tokens {max_num_batched_tokens} --max-num-seqs {max_num_seqs} --max-model-len {max_model_len} --gpu-memory-utilization {gpu_memory_utilization} --tensor-parallel-size {tensor_parallel_size} {'--enforce-eager' if enforce_eager else ''} --log-level {log_level} --host {host} --port {port} --nccl-port {nccl_port} --schedule-mode {schedule_mode} --num-stages {num_stages}"
 
         server_process = run_command(server_command)
         print(f"Server process started with PID: {server_process.pid}")
@@ -174,26 +199,26 @@ if __name__ == "__main__":
             request_configs["num_requests"]
         ):
             dataset_name, input_length, output_length = datasets
-            if dataset_name == "random":
-                if input_length == 16384:
-                    if request_rate >= 1:
-                        continue  # Skip high request rates for long inputs
-                elif input_length == 1024:
-                    if request_rate < 1:
-                        continue  # Skip low request rates for short inputs
-            elif dataset_name == "longbench":
-                if request_rate > 0.5:
-                    continue
-                pass
-            elif dataset_name == "arxiv":
-                if request_rate >= 1 or request_rate < 0.3:
-                    continue
-                pass
-            elif dataset_name == "sharegpt":
-                if request_rate < 0.5:
-                    continue
-            else:
-                raise ValueError(f"Unknown dataset: {dataset_name}")
+            # if dataset_name == "random":
+            #     if input_length == 16384:
+            #         if request_rate >= 1:
+            #             continue  # Skip high request rates for long inputs
+            #     elif input_length == 1024:
+            #         if request_rate < 1:
+            #             continue  # Skip low request rates for short inputs
+            # elif dataset_name == "longbench":
+            #     if request_rate > 0.5:
+            #         continue
+            #     pass
+            # elif dataset_name == "arxiv":
+            #     if request_rate >= 1 or request_rate < 0.3:
+            #         continue
+            #     pass
+            # elif dataset_name == "sharegpt":
+            #     if request_rate < 0.5:
+            #         continue
+            # else:
+            #     raise ValueError(f"Unknown dataset: {dataset_name}")
 
             num_requests = min(num_requests, int(MAX_TIME / (1 / request_rate)))
             print(f"Running benchmark with request config: {input_length}, {output_length}, {request_rate}, {num_requests}")
@@ -226,21 +251,33 @@ if __name__ == "__main__":
                 raise ValueError(f"Unknown dataset: {dataset_name}")
 
             warmup_command = f"python benchmarks/benchmark_serving.py --model {model} --endpoint /generate --request-rate {request_rate} --percentile-metrics 'ttft,tpot,itl,e2el' --metric-percentiles '50,90,95,99' --goodput 'ttft:200' 'tpot:20' 'e2el:20000' --num-prompts {warmup_num_requests} {dataset_flag} --port {port} --backend nano-vllm > /dev/null 2>&1"
+
+            monitor.begin_window("warmup")
             warmup_process = run_command(warmup_command)
 
             # Wait for the warmup to finish
             warmup_process.wait()
 
+            result = monitor.end_window("warmup")
+
             print(f"Warmup completed with return code: {warmup_process.returncode}")
+            print(f"Warmup GPU stats: {result.time}s, {result.total_energy} J")
 
             # Run the benchmark command
             benchmark_command = f"python benchmarks/benchmark_serving.py --model {model} --endpoint /generate --request-rate {request_rate} --percentile-metrics 'ttft,tpot,itl,e2el' --metric-percentiles '50,90,95,99' --goodput 'ttft:200' 'tpot:20' 'e2el:20000' --num-prompts {num_requests} {dataset_flag} --port {port} --backend nano-vllm --save-result --save-detailed --result-filename {json_filename} > {log_filename} 2>&1"
+
+            monitor.begin_window("benchmark")
             benchmark_process = run_command(benchmark_command)
 
             # Wait for the benchmark to finish
             benchmark_process.wait()
 
+            result = monitor.end_window("benchmark")
+
             print(f"Benchmark ({dataset_name}, {input_length}, {output_length}, {request_rate}, {num_requests}) completed with return code: {benchmark_process.returncode}")
+            print(f"Benchmark GPU stats: {result.time}s, {result.total_energy} J")
+            with open(log_filename, "a") as f:
+                f.write(f"\nGPU stats: {result.time}s, {result.total_energy} J, average power: {result.total_energy / result.time if result.time > 0 else 0} W\n")
 
         # Terminate the server process
         while not check_gpu_memory(GPU_ID):
