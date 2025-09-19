@@ -286,9 +286,9 @@ class Qwen3DecoderLayer(nn.Module):
             k = graph_vars["outputs_k"][:bs]
             v = graph_vars["outputs_v"][:bs]
 
-            hidden_states = self.self_attn.attn(q, k, v)
+            attn_o = self.self_attn.attn(q, k, v)
 
-            graph_vars["hidden_states"][:bs] = hidden_states
+            graph_vars["attn_o"][:bs] = attn_o
             graph_vars["residual"][:bs] = graph_vars["outputs_residual"][:bs]
 
             for k, v in graph_vars.items():
@@ -364,6 +364,7 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states = graph_vars["hidden_states"]
         residual = graph_vars["residual"]
         positions = graph_vars["positions"]
+        attn_o = graph_vars["attn_o"]
         outputs_hidden_states = graph_vars["outputs_hidden_states"]
         outputs_residual = graph_vars["outputs_residual"]
         outputs_q = graph_vars["outputs_q"]
@@ -412,17 +413,17 @@ class Qwen3DecoderLayer(nn.Module):
             post_graph = torch.cuda.CUDAGraph()
 
             _positions = positions[:bs].clone()
-            _hidden_states = hidden_states[:bs].clone()
+            _attn_o = attn_o[:bs].clone()
             _residual = residual[:bs].clone()
 
-            _ = self._post_forward(_hidden_states, _residual)
+            _ = self._post_forward(_attn_o, _residual)
 
             with torch.cuda.graph(post_graph, self.post_graph_pool):
                 _positions = positions[:bs].clone()
-                _hidden_states = hidden_states[:bs].clone()
+                _attn_o = attn_o[:bs].clone()
                 _residual = residual[:bs].clone()
 
-                _hidden_states, _residual = self._post_forward(_hidden_states, _residual)
+                _hidden_states, _residual = self._post_forward(_attn_o, _residual)
 
                 outputs_hidden_states[:bs] = _hidden_states
                 outputs_residual[:bs] = _residual
@@ -740,6 +741,7 @@ class Qwen3Model(nn.Module):
         hidden_states = torch.zeros(max_num_batched_tokens, hidden_size)
         residual = torch.zeros(max_num_batched_tokens, hidden_size)
         positions = torch.zeros(max_num_batched_tokens, dtype=torch.int64)
+        attn_o = torch.zeros(max_num_batched_tokens, self.layers[0].self_attn.total_num_heads * self.layers[0].self_attn.head_dim // dist.get_world_size())
         outputs_hidden_states = torch.zeros(max_num_batched_tokens, hidden_size)
         outputs_residual = torch.zeros(max_num_batched_tokens, hidden_size)
         outputs_q = torch.zeros(max_num_batched_tokens, self.layers[0].self_attn.q_size)
@@ -750,6 +752,7 @@ class Qwen3Model(nn.Module):
             hidden_states=hidden_states,
             residual=residual,
             positions=positions,
+            attn_o=attn_o,
             outputs_hidden_states=outputs_hidden_states,
             outputs_residual=outputs_residual,
             outputs_q=outputs_q,
@@ -780,7 +783,8 @@ class Qwen3Model(nn.Module):
         outputs_hidden_states = torch.zeros(max_bs, hidden_size)
         outputs_residual = torch.zeros(max_bs, hidden_size)
 
-        self.graph_bs = list(range(1, 16)) + list(range(16, max_bs + 1, 8))
+        self.graph_bs = list(range(1, 16)) + list(range(16, 32, 4)) + list(range(32, 64, 8)) + list(range(64, 128, 16)) + list(range(128, max_bs + 1, 32))
+        self.graph_bs = [bs for bs in self.graph_bs if bs <= max_bs]
         self.pre_graphs = {}
         self.post_graphs = {}
         self.graph_pool = None

@@ -347,6 +347,9 @@ class FusedMoE(torch.nn.Module):
             :param tp_rank: tensor parallel rank
             :param load_full_w2: whether or not the w2 loaded should be sharded.
         """
+        if expert_data.ndim != loaded_weight.ndim:
+            loaded_weight = loaded_weight.reshape(*loaded_weight.shape[:-2], -1)
+
         if shard_id == "w2":
             # In the case where we have actorder/g_idx, we do not partition the
             # w2 scales, as indicated by `load_full` argument, for all tp cases
@@ -361,6 +364,11 @@ class FusedMoE(torch.nn.Module):
                            loaded_weight=loaded_weight,
                            expert_data=expert_data,
                            tp_rank=tp_rank)
+        elif shard_id in ("w13",):
+            # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
+            shard_size = expert_data.shape[1]
+            loaded_w = loaded_weight.narrow(1, shard_size * tp_rank, shard_size)
+            expert_data.narrow(1, 0, shard_size).copy_(loaded_w)
 
     def _load_per_channel_weight_scale(self, expert_data: torch.Tensor,
                                        shard_dim: int, shard_id: str,
@@ -475,7 +483,7 @@ class FusedMoE(torch.nn.Module):
 
         quant_method_name = self.quant_method.__class__.__name__
 
-        if shard_id not in ("w1", "w2", "w3", "all"):
+        if shard_id not in ("w1", "w2", "w3", "all", "w13"):
             raise ValueError(f"shard_id must be ['w1','w2','w3', 'all'] but "
                              f"got {shard_id}.")
 
@@ -485,7 +493,7 @@ class FusedMoE(torch.nn.Module):
         # Fetch the dim to shard the parameter/loaded weight
         # based on the shard id. This will be whatever
         # dimension intermediate_size_per_partition is used.
-        SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0}
+        SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0, "w13": 1}
 
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
         is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
@@ -502,7 +510,7 @@ class FusedMoE(torch.nn.Module):
         if is_transposed:
             shard_dim = int(not shard_dim)
 
-        full_load = len(loaded_weight.shape) == 3
+        full_load = len(loaded_weight.shape) == 3 or "bias" in weight_name or "block" in weight_name
         if full_load:
             shard_dim += 1
 
@@ -614,6 +622,27 @@ class FusedMoE(torch.nn.Module):
                 expert_data=expert_data,
                 tp_rank=self.tp_rank)
             return True if return_success else None
+
+        # Case model weights
+        if "block" in weight_name:
+            self._load_model_weight_or_group_weight_scale(
+                shard_id=shard_id,
+                shard_dim=-1,
+                loaded_weight=loaded_weight,
+                expert_data=expert_data,
+                tp_rank=self.tp_rank)
+            return True if return_success else None
+
+        if "bias" in weight_name:
+            if shard_id == "w2":
+                if self.tp_rank == 0:
+                    expert_data.copy_(loaded_weight)
+            else:
+                loaded_weight = loaded_weight.narrow(-1, self.tp_rank * loaded_weight.size(-1) // self.tp_size, loaded_weight.size(-1) // self.tp_size)
+                expert_data.copy_(loaded_weight)
+            return True if return_success else None
+
+        raise ValueError(f"Unrecognized weight_name {weight_name}.")
 
         return False if return_success else None
 
@@ -732,10 +761,17 @@ class FusedMoE(torch.nn.Module):
             logical_replica_count=self.logical_replica_count,
         )
 
+        # if hidden_states.shape[0] <= 10:
+        #     print(self.tp_rank, final_hidden_states)
+
         if self.reduce_results and (self.tp_size > 1):
             # Default set to False. (May have to add shared expert outputs.
             final_hidden_states = self.maybe_all_reduce_tensor_model_parallel(
                 final_hidden_states)
+
+        # if hidden_states.shape[0] <= 10:
+        #     print(self.tp_rank, final_hidden_states)
+        #     exit(0)
 
         return final_hidden_states
 

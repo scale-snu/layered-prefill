@@ -880,7 +880,7 @@ class Qwen3MoeModel(nn.Module):
         hidden_states = torch.zeros(max_num_batched_tokens, hidden_size)
         residual = torch.zeros(max_num_batched_tokens, hidden_size)
         positions = torch.zeros(max_num_batched_tokens, dtype=torch.int64)
-        attn_o = torch.zeros(max_num_batched_tokens, self.layers[0].self_attn.total_num_heads * self.layers[0].self_attn.head_dim)
+        attn_o = torch.zeros(max_num_batched_tokens, self.layers[0].self_attn.total_num_heads * self.layers[0].self_attn.head_dim // dist.get_world_size())
         outputs_hidden_states = torch.zeros(max_num_batched_tokens, hidden_size)
         outputs_residual = torch.zeros(max_num_batched_tokens, hidden_size)
         outputs_q = torch.zeros(max_num_batched_tokens, self.layers[0].self_attn.q_size)
@@ -924,7 +924,8 @@ class Qwen3MoeModel(nn.Module):
         outputs_hidden_states = torch.zeros(max_bs, hidden_size)
         outputs_residual = torch.zeros(max_bs, hidden_size)
 
-        self.graph_bs = list(range(1, 16)) + list(range(16, max_bs + 1, 8))
+        self.graph_bs = list(range(1, 16)) + list(range(16, 32, 8)) + list(range(32, 64, 16)) + list(range(64, 128, 32)) + list(range(128, max_bs + 1, 64))
+        self.graph_bs = [bs for bs in self.graph_bs if bs <= max_bs]
         self.pre_graphs = {}
         self.post_graphs = {}
         self.graph_pool = None

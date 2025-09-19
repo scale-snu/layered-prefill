@@ -10,3 +10,4 @@ pandas
 datasets
 pillow
 psutil
+amd-quark

@@ -61,6 +61,8 @@ class ModelRunner:
         load_model(self.model, config.model)
         self.sampler = Sampler()  # 토큰 샘플링을 위한 샘플러
 
+        self.intermediate_outputs = dict()
+
         # 모델 워밍업 및 KV 캐시 할당
         self.warmup_model()
         self.allocate_kv_cache()
@@ -314,8 +316,10 @@ class ModelRunner:
                     prefill_compute_layers.append(np.array_split(np.arange(self.num_layers), seq.num_stages)[seq.stage].tolist())
 
                     # 이전 단계의 중간 출력 가져오기
-                    i_hidden_states, i_residual = seq.intermediate_outputs if seq.intermediate_outputs else (None, None)
-                    seq.intermediate_outputs = None
+                    # i_hidden_states, i_residual = seq.intermediate_outputs if seq.intermediate_outputs else (None, None)
+                    i_hidden_states, i_residual = self.intermediate_outputs.get(seq.seq_id, (None, None))
+                    if seq.seq_id in self.intermediate_outputs:
+                        del self.intermediate_outputs[seq.seq_id]
                     if i_hidden_states is not None:
                         inter_hidden_states.append(i_hidden_states)
                     if i_residual is not None:
@@ -471,11 +475,15 @@ class ModelRunner:
                 if residual is not None:
                     i_residual = residual[start_idx:end_idx]
                 # 시퀀스에 중간 출력 저장 (다음 단계에서 재사용)
-                seq.intermediate_outputs = (i_hidden_states, i_residual)
+                # seq.intermediate_outputs = (i_hidden_states, i_residual)
+                self.intermediate_outputs[seq.seq_id] = (i_hidden_states, i_residual)
 
             # 마지막 단계 완료 후 중간 출력 삭제 (메모리 절약)
-            if seq.stage == seq.num_stages - 1:
-                seq.intermediate_outputs = None
+            if seq.stage >= seq.num_stages - 1:
+                # seq.intermediate_outputs = None
+                if seq.seq_id in self.intermediate_outputs:
+                    del self.intermediate_outputs[seq.seq_id]
+                # torch.cuda.empty_cache()
 
             start_idx = end_idx
 

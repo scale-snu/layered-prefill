@@ -89,6 +89,7 @@ class Attention(nn.Module):
         head_dim,
         scale,
         num_kv_heads,
+        window_size: int = -1,
     ):
         """
         어텐션 레이어 초기화
@@ -104,6 +105,7 @@ class Attention(nn.Module):
         self.head_dim = head_dim
         self.scale = scale
         self.num_kv_heads = num_kv_heads
+        self.window_size = window_size
 
         # KV 캐시 초기화 (빈 텐서로 시작)
         self.k_cache = self.v_cache = torch.tensor([])
@@ -168,6 +170,7 @@ class Attention(nn.Module):
                 softmax_scale=self.scale,
                 causal=True,
                 block_table=context.prefill_block_tables,
+                window_size=(self.window_size, -1),
                 # return_attn_probs=True,
             )
             # if sinks is not None:
@@ -191,6 +194,7 @@ class Attention(nn.Module):
                 causal=True,
                 # return_softmax_lse=True,
                 learnable_sink=sinks,
+                window_size=(self.window_size, -1),
             )
             # print(lse.flatten()[0])
             # if sinks is not None:

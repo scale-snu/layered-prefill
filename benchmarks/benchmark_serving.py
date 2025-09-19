@@ -843,6 +843,7 @@ def main(args: argparse.Namespace):
             ).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
+                output_len=args.arxiv_output_len,
             ),
             "longbench": lambda: LongBenchDataset(
                 random_seed=args.seed, dataset_path=args.dataset_path

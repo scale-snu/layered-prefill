@@ -46,10 +46,10 @@ proj_to_param_shard = {
     "down_proj": ("w2_weight", "w2"),
     "gate_proj": ("w13_weight", "w1"),
     "up_proj":   ("w13_weight", "w3"),
-    "gate_up_proj_bias": ("w13_bias", "all"),
-    "down_proj_bias": ("w2_bias", "all"),
-    "gate_up_proj_blocks": ("w13_weight", "all"),
-    "down_proj_blocks": ("w2_weight", "all"),
+    "gate_up_proj_bias": ("w13_bias", "w13"),
+    "down_proj_bias": ("w2_bias", "w2"),
+    "gate_up_proj_blocks": ("w13_weight", "w13"),
+    "down_proj_blocks": ("w2_weight", "w2"),
 }
 
 def _dequant_mxfp4(x: torch.Tensor, scale: torch.Tensor,
@@ -69,6 +69,7 @@ def load_model(model: nn.Module, path: str):
     for file in glob(os.path.join(path, "*.safetensors")):
         with safe_open(file, "pt", "cpu") as f:
             for weight_name in f.keys():
+                # print(f"Loading weight: {weight_name}")
                 # 1. MoE expert 파라미터 처리
                 m = moe_expert_pattern.fullmatch(weight_name)
                 if m:
@@ -93,8 +94,20 @@ def load_model(model: nn.Module, path: str):
                         if scale.ndim + 1 == loaded_weight.ndim:
                             scale = scale.unsqueeze(-1)
                         loaded_weight = _dequant_mxfp4(loaded_weight, scale, param.dtype)
+
                     moe_layer.weight_loader(param, loaded_weight, weight_name, shard_id, expert_id)
                     continue
+                if "sinks" in weight_name:
+                    import torch.distributed as dist
+
+                    tp_rank = dist.get_rank()
+                    tp_size = dist.get_world_size()
+
+                    param = model.get_parameter(weight_name)
+                    # param = param.narrow(0, tp_rank * param.size(0) // tp_size, param.size(0) // tp_size)
+                    param.data.copy_(f.get_tensor(weight_name).chunk(tp_size, 0)[tp_rank])
+                    continue
+
                 # 2. 기존 packed_modules_mapping 처리
                 for k in packed_modules_mapping:
                     if k in weight_name:

@@ -553,26 +553,57 @@ class ArxivDataset(BenchmarkDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
+        output_len: Optional[int] = None,
         **kwargs,
     ) -> list:
         requests = []
         for i in range(num_requests):
+            # entry = self.data[i]
+            # article, abstract = (
+            #     entry[0],
+            #     entry[1]
+            # )
+
+            # output_token_ids = tokenizer.encode(abstract, add_special_tokens=False)
+            # output_len = len(output_token_ids)
+
+            # input_token_ids = tokenizer.encode(article, add_special_tokens=False)
+            # total_input_len = len(input_token_ids)
+            # requests.append(
+            #     SampleRequest(
+            #         prompt=article,
+            #         prompt_len=total_input_len,
+            #         expected_output_len=output_len,
+            #     )
+            # )
             entry = self.data[i]
             article, abstract = (
                 entry[0],
                 entry[1]
             )
 
-            output_token_ids = tokenizer.encode(abstract, add_special_tokens=False)
-            output_len = len(output_token_ids)
+            messages = [
+                {"role": "user", "content": article + "\n\nSummarize the above article.\n\n"},
+            ]
 
-            input_token_ids = tokenizer.encode(article, add_special_tokens=False)
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                # tokenizer_kwargs={"add_special_tokens": False},
+            )
+
+            output_token_ids = tokenizer.encode(abstract, add_special_tokens=False)
+            new_output_len = len(output_token_ids) if output_len is None else output_len
+
+            input_token_ids = tokenizer.encode(prompt, add_special_tokens=False)
             total_input_len = len(input_token_ids)
+
             requests.append(
                 SampleRequest(
-                    prompt=article,
+                    prompt=prompt,
                     prompt_len=total_input_len,
-                    expected_output_len=output_len,
+                    expected_output_len=new_output_len,
                 )
             )
         return requests
