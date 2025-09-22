@@ -5,6 +5,7 @@ import torch
 @dataclass
 class Context:
     is_prefill: bool = False
+    len_prefill: int = 0
     cu_seqlens_q: torch.Tensor | None = None
     cu_seqlens_k: torch.Tensor | None = None
     max_seqlen_q: int = 0
@@ -22,6 +23,7 @@ def get_context():
 
 def set_context(
         is_prefill=False,
+        len_prefill=0,
         cu_seqlens_q=None,
         cu_seqlens_k=None,
         max_seqlen_q=0,
@@ -35,6 +37,7 @@ def set_context(
     global _CONTEXT
     _CONTEXT = Context(
         is_prefill=is_prefill,
+        len_prefill=len_prefill,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_k=cu_seqlens_k,
         max_seqlen_q=max_seqlen_q,

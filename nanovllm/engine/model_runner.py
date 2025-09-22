@@ -362,6 +362,7 @@ class ModelRunner:
         # 컨텍스트 설정
         set_context(
             is_prefill,
+            int(cu_seqlens_q[-1]) if is_prefill else 0,
             cu_seqlens_q,
             cu_seqlens_k,
             max_seqlen_q,
@@ -527,7 +528,7 @@ class ModelRunner:
             graph = torch.cuda.CUDAGraph()
 
             # 컨텍스트 설정 (DECODING 모드)
-            set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], decode_block_tables=block_tables[:bs])
+            set_context(False, 0, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], decode_block_tables=block_tables[:bs])
 
             # 워밍업 실행
             outputs[:bs] = self.model(input_ids[:bs], positions[:bs])[0]

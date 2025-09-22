@@ -3,6 +3,8 @@
 #include <cuda_runtime.h>
 #include <c10/cuda/CUDAGuard.h>         // c10::cuda::CUDAGuard
 
+namespace sarathi {
+
 template <typename scalar_t, typename index_t>
 __global__ void store_kvcache_kernel(
     const scalar_t* __restrict__ key,     // [N, Hk, Hd]
@@ -65,6 +67,8 @@ void launch_kernel(
     );
 }
 
+} // namespace sarathi
+
 void store_kvcache_cuda(
     at::Tensor key,          // [N, Hk, Hd]
     at::Tensor value,        // [N, Hk, Hd]
@@ -82,7 +86,7 @@ void store_kvcache_cuda(
                 "key/value/k_cache/v_cache must have same dtype.");
 
     TORCH_CHECK(key.dim() == 3 && value.dim() == 3, "key/value must be [N, Hk, Hd].");
-    TORCH_CHECK(k_cache.dim() == 4 && v_cache.dim() == 4, "k_cache/v_cache must be [B, BS, Hk, Hd].");
+    TORCH_CHECK(k_cache.dim() == 4 && v_cache.dim() == 4, "k_cache/v_cache must be [B, BS, Hk, Hd].");  // num_blocks, block_size, num_heads, head_dim
     TORCH_CHECK(slot_mapping.dim() == 1, "slot_mapping must be [N].");
 
     const int64_t N  = key.size(0);
@@ -120,7 +124,7 @@ void store_kvcache_cuda(
 
     if (slot_mapping.scalar_type() == at::kInt) {
         AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, st, "store_kvcache_cuda", [&] {
-            launch_kernel<scalar_t, int32_t>(
+            sarathi::launch_kernel<scalar_t, int32_t>(
                 key.data_ptr<scalar_t>(),
                 key.stride(0), key.stride(1), key.stride(2),
                 value.data_ptr<scalar_t>(),
@@ -136,7 +140,7 @@ void store_kvcache_cuda(
         });
     } else if (slot_mapping.scalar_type() == at::kLong) {
         AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, st, "store_kvcache_cuda", [&] {
-            launch_kernel<scalar_t, int64_t>(
+            sarathi::launch_kernel<scalar_t, int64_t>(
                 key.data_ptr<scalar_t>(),
                 key.stride(0), key.stride(1), key.stride(2),
                 value.data_ptr<scalar_t>(),

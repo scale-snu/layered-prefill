@@ -74,6 +74,17 @@ moe_extension = CUDAExtension(
 )
 ext_modules.append(moe_extension)
 
+# Store KV cache kernels.
+store_kvcache_extension = CUDAExtension(
+    name="nanovllm.store_kvcache_ops",
+    sources=["csrc/store_kvcache.cpp", "csrc/store_kvcache_kernels.cu"],
+    extra_compile_args={
+        "cxx": CXX_FLAGS,
+        "nvcc": NVCC_FLAGS,
+    },
+)
+ext_modules.append(store_kvcache_extension)
+
 
 setup(
     name="layered-prefill",

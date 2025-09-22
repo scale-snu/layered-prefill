@@ -5,49 +5,7 @@ import triton.language as tl
 
 from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 from nanovllm.utils.context import get_context
-
-
-@triton.jit
-def store_kvcache_kernel(
-    key_ptr,
-    key_stride,
-    value_ptr,
-    value_stride,
-    k_cache_ptr,
-    v_cache_ptr,
-    slot_mapping_ptr,
-    D: tl.constexpr,
-):
-    """
-    Triton 커널: Key-Value 캐시에 데이터를 저장하는 최적화된 커널
-
-    Args:
-        key_ptr: 입력 Key 텐서의 포인터
-        key_stride: Key 텐서의 stride
-        value_ptr: 입력 Value 텐서의 포인터
-        value_stride: Value 텐서의 stride
-        k_cache_ptr: Key 캐시 텐서의 포인터
-        v_cache_ptr: Value 캐시 텐서의 포인터
-        slot_mapping_ptr: 슬롯 매핑 텐서의 포인터
-        D: 헤드 차원 (num_heads * head_dim)
-    """
-    idx = tl.program_id(0)  # 현재 스레드의 인덱스
-
-    # Key와 Value의 오프셋 계산
-    key_offsets = idx * key_stride + tl.arange(0, D)
-    value_offsets = idx * value_stride + tl.arange(0, D)
-
-    # Key와 Value 데이터 로드
-    key = tl.load(key_ptr + key_offsets)
-    value = tl.load(value_ptr + value_offsets)
-
-    # 슬롯 매핑에서 캐시 위치 가져오기
-    slot = tl.load(slot_mapping_ptr + idx)
-    cache_offsets = slot * D + tl.arange(0, D)
-
-    # 캐시에 Key와 Value 저장
-    tl.store(k_cache_ptr + cache_offsets, key)
-    tl.store(v_cache_ptr + cache_offsets, value)
+from nanovllm import store_kvcache_ops
 
 
 def store_kvcache(key: torch.Tensor, value: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, slot_mapping: torch.Tensor):
@@ -71,7 +29,7 @@ def store_kvcache(key: torch.Tensor, value: torch.Tensor, k_cache: torch.Tensor,
     assert slot_mapping.numel() == N
 
     # Triton 커널 실행
-    store_kvcache_kernel[(N,)](key, key.stride(0), value, value.stride(0), k_cache, v_cache, slot_mapping, D)
+    store_kvcache_ops.store_kvcache(key, value, k_cache, v_cache, slot_mapping)
 
 
 class Attention(nn.Module):
@@ -132,9 +90,6 @@ class Attention(nn.Module):
         # 현재 컨텍스트 정보 가져오기
         context = get_context()
 
-        # PREFILLING 토큰 수 계산
-        len_prefill = context.cu_seqlens_q[-1] if context.is_prefill else 0
-
         # KV 캐시 참조
         k_cache, v_cache = self.k_cache, self.v_cache
 
@@ -151,18 +106,17 @@ class Attention(nn.Module):
         os = []  # 출력 텐서들을 저장할 리스트
 
         # ===== PREFILLING 단계 처리 =====
-        if context.is_prefill and len_prefill > 0:
+        if context.is_prefill and context.len_prefill > 0:  # prefill
             if context.prefill_block_tables is not None:
                 # Chunked prefill 모드: 캐시된 Key-Value 사용
                 k, v = k_cache, v_cache
             else:
                 # 일반 prefill 모드: 현재 입력의 PREFILLING 부분만 사용
-                k = k[:len_prefill]
-                v = v[:len_prefill]
-
+                k = k[:context.len_prefill]
+                v = v[:context.len_prefill]
             # Flash Attention을 사용한 PREFILLING 어텐션 계산
             o = flash_attn_varlen_func(
-                q[:len_prefill], k, v, learnable_sink=sinks,
+                q[:context.len_prefill], k, v, learnable_sink=sinks,
                 max_seqlen_q=context.max_seqlen_q,
                 cu_seqlens_q=context.cu_seqlens_q,
                 max_seqlen_k=context.max_seqlen_k,
@@ -186,7 +140,7 @@ class Attention(nn.Module):
         if context.decode_block_tables is not None:  # decoding
             # Flash Attention with KV Cache를 사용한 DECODING 어텐션 계산
             o = flash_attn_with_kvcache(
-                q[len_prefill:].unsqueeze(1),  # 마지막 토큰만 사용 (새로 생성된 토큰)
+                q[context.len_prefill:].unsqueeze(1),  # 마지막 토큰만 사용 (새로 생성된 토큰)
                 k_cache, v_cache,
                 cache_seqlens=context.context_lens,
                 block_table=context.decode_block_tables,

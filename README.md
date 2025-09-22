@@ -3,8 +3,10 @@
 ## How to install
 
 ```bash
-pip install torch
+conda install -n layered-prefill cuda-toolkit cuda-version=12.8 cmake ninja ccache c-compiler cxx-compiler -c nvidia
+pip install torch uv flash-attn
 pip install -e . --no-build-isolation
+CCACHE_NOHASHDIR="true" uv pip install -e flash-attention --verbose --refresh --no-build-isolation
 ```
 
 ## How to run

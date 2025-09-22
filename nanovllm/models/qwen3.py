@@ -604,6 +604,7 @@ class Qwen3Model(nn.Module):
                     # 시퀀스 길이 정보 수정
                     cu_seqlens_k = context.cu_seqlens_k.clone()
                     cu_seqlens_q = context.cu_seqlens_q.clone()
+                    len_prefill = context.len_prefill
                     context.cu_seqlens_k = [0]
                     context.cu_seqlens_q = [0]
                     for prefill_seq_idx in prefill_seq_indices:
@@ -611,6 +612,7 @@ class Qwen3Model(nn.Module):
                         context.cu_seqlens_q.append(cu_seqlens_q[prefill_seq_idx + 1] - cu_seqlens_q[prefill_seq_idx])
                     context.cu_seqlens_k = torch.tensor(context.cu_seqlens_k, device=hidden_states.device, dtype=torch.int32).cumsum(dim=0, dtype=torch.int32)
                     context.cu_seqlens_q = torch.tensor(context.cu_seqlens_q, device=hidden_states.device, dtype=torch.int32).cumsum(dim=0, dtype=torch.int32)
+                    context.len_prefill = context.cu_seqlens_q[-1].item()
 
                     # 블록 테이블 및 슬롯 매핑 수정
                     prefill_block_tables = None
@@ -643,6 +645,7 @@ class Qwen3Model(nn.Module):
                     context.max_seqlen_q = max_seqlen_q
                     context.cu_seqlens_k = cu_seqlens_k
                     context.cu_seqlens_q = cu_seqlens_q
+                    context.len_prefill = len_prefill
                     context.prefill_block_tables = prefill_block_tables
                     context.slot_mapping = slot_mapping
 
