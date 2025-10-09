@@ -10,4 +10,9 @@ pandas
 datasets
 pillow
 psutil
-amd-quark
+amd-quark==0.9.0
+pynvml
+seaborn
+duckdb
+pyzmq
+zeus

@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from nanovllm import layernorm_ops
+from nanovllm.layers import custom_ops as ops
 
 
 class RMSNorm(nn.Module):
@@ -25,10 +25,8 @@ class RMSNorm(nn.Module):
         x = x.reshape(-1, self.hidden_size)
         out = torch.empty_like(x)
         if residual is None:
-            layernorm_ops.rms_norm(out, x, self.weight.data, self.eps)
+            ops.rms_norm(out, x, self.weight.data, self.eps)
             return out.reshape(shape)
         else:
-            x += residual
-            residual = x.clone()
-            layernorm_ops.rms_norm(out, x, self.weight.data, self.eps)
+            ops.add_rms_norm(out, residual, x, self.weight.data, self.eps)
             return out.reshape(shape), residual

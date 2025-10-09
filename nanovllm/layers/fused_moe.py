@@ -12,7 +12,8 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from torch.nn.parameter import UninitializedParameter
 
-from nanovllm.layers.nccl_communicator import tensor_model_parallel_all_reduce
+from nanovllm.layers.custom_all_reduce import tensor_model_parallel_all_reduce
+# from nanovllm.layers.nccl_communicator import tensor_model_parallel_all_reduce
 from nanovllm.layers.for_moe.utils import set_weight_attrs
 from nanovllm.layers.for_moe.fused_moe import fused_experts
 
@@ -101,6 +102,9 @@ class FusedMoEMethodBase(ABC):
     ) -> torch.Tensor:
         raise NotImplementedError
 
+# count_tensor: torch.Tensor
+# count: torch.Tensor
+
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
     """MoE method without quantization."""
 
@@ -152,6 +156,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
             layer.register_parameter("w2_bias", w2_bias)
             set_weight_attrs(w2_bias, extra_weight_attrs)
 
+        # global count_tensor, count
+        # count_tensor = torch.zeros(num_experts, dtype=torch.int32).cuda()
+        # count = torch.zeros(num_experts, dtype=torch.int32).cuda()
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -187,7 +195,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
 
-        # print(f"[MoE] {topk_ids.unique().tolist()}")
+        # global count_tensor, count
+        # count.zero_()
+        # count[topk_ids.flatten()] += 1
+        # count_tensor.add_((count > 0).int())
 
         return self.fused_experts(
                 hidden_states=x,

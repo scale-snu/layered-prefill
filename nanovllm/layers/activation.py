@@ -2,7 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from nanovllm import activation_ops
+from nanovllm import ops
 
 
 class SiluAndMul(nn.Module):
@@ -15,5 +15,5 @@ class SiluAndMul(nn.Module):
         num_tokens = x.shape[0]
         d = x.shape[1] // 2
         out = torch.empty(num_tokens, d, dtype=x.dtype, device=x.device)
-        activation_ops.silu_and_mul(out, x)
+        ops.silu_and_mul(out, x)
         return out

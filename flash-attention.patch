@@ -1,0 +1,100 @@
+diff --git CMakeLists.txt CMakeLists.txt
+index 015ea93..feb9b3a 100644
+--- CMakeLists.txt
++++ CMakeLists.txt
+@@ -1,6 +1,40 @@
+ cmake_minimum_required(VERSION 3.26)
+ 
+ project(vllm_flash_attn LANGUAGES CXX CUDA)
++
++find_package(CUDA)
++if (NOT CUDA_FOUND)
++  message(FATAL_ERROR "CUDA is required to build vllm-flash-attn.")
++endif()
++
++set(PYTORCH_VERSION $ENV{PYTORCH_VERSION} CACHE STRING "PyTorch version, e.g. 2.4.0")
++set(PYTORCH_CUDA_VERSION $ENV{PYTORCH_CUDA_VERSION} CACHE STRING "PyTorch CUDA version, e.g. 11.8, 12.1, 12.2, 12.3, 12.4, 12.5, 12.6, 12.7, 12.8")
++
++message(STATUS "PyTorch version: ${PYTORCH_VERSION}")
++message(STATUS "PyTorch CUDA version: ${PYTORCH_CUDA_VERSION}")
++
++# assumes find_package(CUDAToolkit) was already done
++if(
++    PYTORCH_VERSION VERSION_GREATER_EQUAL 2.5.0 AND
++    PYTORCH_CUDA_VERSION VERSION_GREATER_EQUAL 12
++)
++    message(STATUS "PyTorch NVTX headers workaround: Yes")
++    # only do this if nvToolsExt is not defined and CUDA::nvtx3 exists
++    if(NOT TARGET CUDA::nvToolsExt AND TARGET CUDA::nvtx3)
++        add_library(CUDA::nvToolsExt INTERFACE IMPORTED)
++        # ensure that PyTorch is told to use NVTX3 headers
++        target_compile_definitions(
++            CUDA::nvToolsExt INTERFACE
++            TORCH_CUDA_USE_NVTX3
++        )
++        target_link_libraries(CUDA::nvToolsExt INTERFACE CUDA::nvtx3)
++    endif()
++else()
++    message(STATUS "PyTorch NVTX headers workaround: No")
++endif()
++# find Torch C++ as usual
++find_package(Torch CONFIG)
++
+ set(CMAKE_CXX_STANDARD 17)
+ set(CMAKE_CXX_EXTENSIONS OFF)
+ 
+@@ -39,7 +73,7 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx11
+ # Note: these should be kept in sync with the torch version in setup.py.
+ # Likely should also be in sync with the vLLM version.
+ #
+-set(TORCH_SUPPORTED_VERSION_CUDA "2.4.0")
++set(TORCH_SUPPORTED_VERSION_CUDA "2.8.0")
+ 
+ find_python_constrained_versions(${PYTHON_SUPPORTED_VERSIONS})
+ 
+@@ -192,7 +226,7 @@ if (FA3_ENABLED AND ${CMAKE_CUDA_COMPILER_VERSION} GREATER_EQUAL 12.0)
+     file(GLOB FA3_BF16_GEN_SRCS_
+         "hopper/instantiations/flash_fwd_*_bf16_*_sm80.cu")
+     list(APPEND FA3_BF16_GEN_SRCS ${FA3_BF16_GEN_SRCS_})
+-    
++
+     # FP16 source files
+     file(GLOB FA3_FP16_GEN_SRCS
+         "hopper/instantiations/flash_fwd_hdim64_fp16*_sm90.cu"
+@@ -234,7 +268,7 @@ if (FA3_ENABLED AND ${CMAKE_CUDA_COMPILER_VERSION} GREATER_EQUAL 12.0)
+             SRCS "${FA3_GEN_SRCS}"
+             CUDA_ARCHS "${FA3_ARCHS}")
+         set_gencode_flags_for_srcs(
+-            SRCS 
++            SRCS
+                 hopper/flash_fwd_combine.cu
+                 hopper/flash_prepare_scheduler.cu
+             CUDA_ARCHS "${FA3_ARCHS}")
+diff --git pyproject.toml pyproject.toml
+index 4a3200a..db69adc 100644
+--- pyproject.toml
++++ pyproject.toml
+@@ -5,7 +5,7 @@ requires = [
+     "ninja",
+     "packaging",
+     "setuptools >= 49.4.0",
+-    "torch == 2.4.0",
++    "torch == 2.8.0",
+     "wheel",
+     "jinja2",
+ ]
+diff --git setup.py setup.py
+index 00d4826..0384d81 100644
+--- setup.py
++++ setup.py
+@@ -255,8 +255,8 @@ def get_package_version():
+         return str(public_version)
+ 
+ 
+-PYTORCH_VERSION = "2.4.0"
+-MAIN_CUDA_VERSION = "12.1"
++PYTORCH_VERSION = "2.8.0"
++MAIN_CUDA_VERSION = "12.8"
+ 
+ 
+ def get_nvcc_cuda_version() -> Version:

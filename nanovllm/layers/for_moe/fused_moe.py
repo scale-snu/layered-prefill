@@ -11,7 +11,7 @@ import triton
 import triton.language as tl
 
 from nanovllm.layers.for_moe.moe_easy_kernel import topk_softmax, moe_sum, silu_and_mul, gelu_and_mul, swigluoai
-from nanovllm import moe_ops
+from nanovllm import ops
 
 
 def moe_align_block_size(
@@ -64,7 +64,7 @@ def moe_align_block_size(
         (max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device
     )
     num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
-    moe_ops.moe_align_block_size(
+    ops.moe_align_block_size(
         topk_ids, num_experts, block_size, sorted_ids, expert_ids, num_tokens_post_pad
     )
     return sorted_ids, expert_ids, num_tokens_post_pad
@@ -407,7 +407,7 @@ def fused_topk(
     token_expert_indicies = torch.empty(
         M, topk, dtype=torch.int32, device=hidden_states.device
     )
-    moe_ops.topk_softmax(
+    ops.topk_softmax(
         topk_weights,
         topk_ids,
         token_expert_indicies,
@@ -596,11 +596,11 @@ def fused_experts_impl(
                                 )
 
         if activation == "silu":
-            silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
+            ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
         elif activation == "gelu":
             gelu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
         elif activation == "swigluoai":
-            swigluoai(intermediate_cache2, intermediate_cache1.view(-1, N))
+            ops.swigluoai_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N), 1.702, 7.0)
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 

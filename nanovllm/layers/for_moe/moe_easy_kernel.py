@@ -74,7 +74,6 @@ def silu_and_mul_triton(output: torch.Tensor, input: torch.Tensor):
     assert input.ndim == 2 and output.ndim == 2
     num_tokens, two_d = input.shape
     d = two_d // 2
-    # d보다 크거나 같은 2의 제곱수, 최대 128
     block_size = 1 << (d - 1).bit_length()
     block_size = min(block_size, 128)
     grid = (num_tokens,)
@@ -93,12 +92,9 @@ def gelu_and_mul(out: torch.Tensor, x: torch.Tensor):
     x: (num_tokens, 2 * d)
     """
     d = x.shape[-1] // 2
-    # 앞 절반에 GELU 적용
     x0 = x[..., :d]
     x1 = x[..., d:]
-    # PyTorch의 GELU (기본은 'none' approximation)
     gelu_x0 = F.gelu(x0)
-    # 곱셈 후 out에 저장 (in-place)
     out.copy_(gelu_x0 * x1)
 
 # gelu and mul is appropriate to use triton kernel than topk_softmax and moe_sum

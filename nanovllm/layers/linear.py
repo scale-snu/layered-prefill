@@ -2,6 +2,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
+from nanovllm.layers.custom_all_reduce import tensor_model_parallel_all_reduce
+# from nanovllm.layers.nccl_communicator import tensor_model_parallel_all_reduce
 
 
 def divide(numerator, denominator):
@@ -174,5 +176,5 @@ class RowParallelLinear(LinearBase):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = F.linear(x, self.weight, self.bias if self.tp_rank == 0 else None)
         if self.tp_size > 1:
-            dist.all_reduce(y)
+            y = tensor_model_parallel_all_reduce(y)
         return y

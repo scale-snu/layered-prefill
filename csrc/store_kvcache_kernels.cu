@@ -28,17 +28,19 @@ __global__ void store_kvcache_kernel(
         const int64_t b  = static_cast<int64_t>(slot) / BS;   // block idx
         const int64_t off = static_cast<int64_t>(slot) - b * BS; // offset within block
 
-        // threads cover D (= Hk*Hd)
-        for (int64_t t = threadIdx.x; t < D; t += blockDim.x) {
-            const int64_t h  = t / Hd;   // head index
-            const int64_t hd = t - h * Hd;
+        if (slot >= 0) {  // slot < 0 means ignore this token
+            // threads cover D (= Hk*Hd)
+            for (int64_t t = threadIdx.x; t < D; t += blockDim.x) {
+                const int64_t h  = t / Hd;   // head index
+                const int64_t hd = t - h * Hd;
 
-            const scalar_t k_val = key  [n * k_s0 + h * k_s1 + hd * k_s2];
-            const scalar_t v_val = value[n * v_s0 + h * v_s1 + hd * v_s2];
+                const scalar_t k_val = key  [n * k_s0 + h * k_s1 + hd * k_s2];
+                const scalar_t v_val = value[n * v_s0 + h * v_s1 + hd * v_s2];
 
-            // k_cache[b, off, h, hd]
-            k_cache[b * kc_s0 + off * kc_s1 + h * kc_s2 + hd * kc_s3] = k_val;
-            v_cache[b * vc_s0 + off * vc_s1 + h * vc_s2 + hd * vc_s3] = v_val;
+                // k_cache[b, off, h, hd]
+                k_cache[b * kc_s0 + off * kc_s1 + h * kc_s2 + hd * kc_s3] = k_val;
+                v_cache[b * vc_s0 + off * vc_s1 + h * vc_s2 + hd * vc_s3] = v_val;
+            }
         }
     }
 }

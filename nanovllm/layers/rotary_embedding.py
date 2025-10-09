@@ -27,7 +27,8 @@ from typing import Any, Dict, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from nanovllm import pos_encoding_ops
+# from nanovllm import ops
+from nanovllm.layers import custom_ops as ops
 
 
 class RotaryEmbedding(nn.Module):
@@ -89,9 +90,9 @@ class RotaryEmbedding(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # pos_encoding_ops.rotary_embedding() is an in-place operation that
+        # ops.rotary_embedding() is an in-place operation that
         # updates the query and key tensors.
-        pos_encoding_ops.rotary_embedding(
+        ops.rotary_embedding(
             positions,
             query,
             key,

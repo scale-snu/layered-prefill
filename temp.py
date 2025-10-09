@@ -13,66 +13,155 @@ from tqdm import tqdm
 
 datas = []
 
+# # A100
+# slo_constraints = {
+#     "models--Qwen--Qwen3-30B-A3B": {
+#         "longbench": {
+#             "ttft": 10,
+#             # "itl": None,
+#             "itl": 0.20,
+#             "tpot": 0.20,
+#             # "tpot": 0.1,
+#             # "tpot": None,
+#         },
+#         "arxiv": {
+#             "ttft": 10,
+#             # "itl": None,
+#             "itl": 0.20,
+#             "tpot": 0.20,
+#             # "tpot": 0.1,
+#             # "tpot": None,
+#         },
+#         "random": {
+#             "ttft": 2,
+#             "itl": 0.20,
+#             "tpot": 0.20,
+#         },
+#         "sharegpt": {
+#             "ttft": 5,
+#             # "itl": None,
+#             "itl": 0.20,
+#             "tpot": 0.20,
+#             # "tpot": 0.1,
+#             # "tpot": None,
+#         },
+#     },
+#     "models--openai--gpt-oss-20b": {
+#         "longbench": {
+#             "ttft": 10,
+#             # "itl": None,
+#             "itl": 0.18,
+#             # "tpot": 0.18,
+#             # "tpot": 0.1,
+#             "tpot": None,
+#         },
+#         "arxiv": {
+#             "ttft": 10,
+#             # "itl": None,
+#             "itl": 0.18,
+#             # "tpot": 0.18,
+#             # "tpot": 0.1,
+#             "tpot": None,
+#         },
+#         "random": {
+#             "ttft": 2,
+#             "itl": 0.18,
+#             # "tpot": 0.18,
+#             "tpot": None,
+#         },
+#         "sharegpt": {
+#             "ttft": 5,
+#             # "itl": None,
+#             "itl": 0.18,
+#             # "tpot": 0.18,
+#             # "tpot": 0.1,
+#             "tpot": None,
+#         },
+#     },
+#     "models--Qwen--Qwen3-8B": {
+#         "longbench": {
+#             "ttft": 5,
+#             # "itl": None,
+#             "itl": 1.00,
+#             "tpot": 0.20,
+#             # "tpot": 0.08,
+#         },
+#         "random": {
+#             "ttft": 2,
+#             "itl": None,
+#             "tpot": 0.2,
+#         },
+#         "sharegpt": {
+#             "ttft": 3,
+#             # "itl": None,
+#             "itl": 0.20,
+#             "tpot": None,
+#             # "tpot": 0.08,
+#         },
+#     }
+# }
+
+# H100
 slo_constraints = {
     "models--Qwen--Qwen3-30B-A3B": {
         "longbench": {
             "ttft": 10,
             # "itl": None,
-            "itl": 0.20,
-            "tpot": 0.20,
+            "itl": 0.125,
+            # "tpot": 0.125,
             # "tpot": 0.1,
-            # "tpot": None,
+            "tpot": None,
         },
         "arxiv": {
             "ttft": 10,
             # "itl": None,
-            "itl": 0.20,
-            "tpot": 0.20,
+            "itl": 0.125,
+            # "tpot": 0.125,
             # "tpot": 0.1,
-            # "tpot": None,
+            "tpot": None,
         },
         "random": {
             "ttft": 2,
-            "itl": 0.20,
-            "tpot": 0.20,
+            "itl": 0.125,
+            "tpot": 0.125,
         },
         "sharegpt": {
             "ttft": 5,
             # "itl": None,
-            "itl": 0.20,
-            "tpot": 0.20,
+            "itl": 0.125,
+            # "tpot": 0.125,
             # "tpot": 0.1,
-            # "tpot": None,
+            "tpot": None,
         },
     },
     "models--openai--gpt-oss-20b": {
         "longbench": {
             "ttft": 10,
             # "itl": None,
-            "itl": 0.18,
-            # "tpot": 0.18,
+            "itl": 0.10,
+            # "tpot": 0.10,
             # "tpot": 0.1,
             "tpot": None,
         },
         "arxiv": {
             "ttft": 10,
             # "itl": None,
-            "itl": 0.18,
-            # "tpot": 0.18,
+            "itl": 0.10,
+            # "tpot": 0.10,
             # "tpot": 0.1,
             "tpot": None,
         },
         "random": {
             "ttft": 2,
-            "itl": 0.18,
-            # "tpot": 0.18,
+            "itl": 0.10,
+            # "tpot": 0.10,
             "tpot": None,
         },
         "sharegpt": {
             "ttft": 5,
             # "itl": None,
-            "itl": 0.18,
-            # "tpot": 0.18,
+            "itl": 0.10,
+            # "tpot": 0.10,
             # "tpot": 0.1,
             "tpot": None,
         },
@@ -123,11 +212,11 @@ for filename in tqdm(os.listdir(log_dir)):
                 for request_dt, ttft, itl in zip(request_dts, ttfts, itls):
                     start_dt = datetime.datetime.fromisoformat(request_dt)
                     end_dt = start_dt + datetime.timedelta(seconds=ttft + sum(itl))
-                    for _itl in itl:
-                        if _itl > 0.2 and model_name == "models--openai--gpt-oss-20b" and dataset_name == "sharegpt":
-                            pq.put((start_dt + datetime.timedelta(seconds=ttft + _itl), 100 + _itl))
-                        else:
-                            pq.put((start_dt + datetime.timedelta(seconds=ttft + _itl), 0))
+                    # for _itl in itl:
+                        # if _itl > 0.2 and model_name == "models--openai--gpt-oss-20b" and dataset_name == "sharegpt":
+                        #     pq.put((start_dt + datetime.timedelta(seconds=ttft + _itl), 100 + _itl))
+                        # else:
+                        # pq.put((start_dt + datetime.timedelta(seconds=ttft + _itl), 0))
                     pq.put((start_dt, 1))
                     pq.put((end_dt, -1))
 
@@ -136,12 +225,12 @@ for filename in tqdm(os.listdir(log_dir)):
                 _num_requests = []
                 while not pq.empty():
                     date, change = pq.get()
-                    if model_name == "models--openai--gpt-oss-20b" and dataset_name == "sharegpt":
-                        print(date)
+                    # if model_name == "models--openai--gpt-oss-20b" and dataset_name == "sharegpt":
+                    #     print(date)
                     current_requests += change
                     if change > 0:
-                        if change > 100:
-                            import pdb; pdb.set_trace()
+                        # if change > 100:
+                            # import pdb; pdb.set_trace()
                         max_requests = max(max_requests, current_requests)
                         _num_requests.append(current_requests)
                 mean_requests = np.mean(_num_requests)
