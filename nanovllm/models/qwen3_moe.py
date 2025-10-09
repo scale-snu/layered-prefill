@@ -779,7 +779,7 @@ class Qwen3MoeModel(nn.Module):
         bs = 128
         # self.graph_bs = []
         # bs = 1
-        while bs <= min(max_num_batched_tokens, 8192):
+        while bs <= min(max_num_batched_tokens, 1024):
             self.graph_bs.append(bs)
             bs = bs * 2
         self.graph_bs = [bs for bs in self.graph_bs if bs <= max_num_batched_tokens]
@@ -919,8 +919,8 @@ class Qwen3MoeForCausalLM(nn.Module):
         intermediate_outputs: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, intermediate_outputs)
-        from nanovllm.layers.fused_moe import count_tensor
-        print(count_tensor.sum())
+        # from nanovllm.layers.fused_moe import count_tensor
+        # print(count_tensor.sum())
         return hidden_states
 
     def compute_logits(

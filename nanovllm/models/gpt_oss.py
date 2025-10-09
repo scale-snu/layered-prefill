@@ -596,7 +596,7 @@ class GptOssModel(nn.Module):
                     context.len_prefill = len_prefill
                     context.slot_mapping = slot_mapping
 
-            if len(self.layers) - 1 in context.prefill_compute_layer
+            if len(self.layers) - 1 in context.prefill_compute_layers:
                 _hidden_states, _residual = self.norm(hidden_states[:], residual[:])
                 hidden_states[:] = _hidden_states
                 residual[:] = _residual
