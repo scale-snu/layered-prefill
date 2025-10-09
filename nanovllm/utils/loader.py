@@ -34,14 +34,11 @@ def find_fused_moe_layer(model, layer_idx):
         return layer
     return None
 
-# MoE expert 파라미터 패턴: model.layers.<layer_idx>.mlp.experts.<expert_id>.<proj>.weight
 moe_expert_pattern = re.compile(
     r"^model\.layers\.(\d+)\.mlp\.experts(?:\.(\d+))?\."
     r"(down_proj|up_proj|gate_proj|down_proj_bias|gate_up_proj_bias|gate_up_proj_blocks|down_proj_blocks)(?:\.weight)?$"
 )
 
-
-# proj -> (param_name, shard_id) 매핑
 proj_to_param_shard = {
     "down_proj": ("w2_weight", "w2"),
     "gate_proj": ("w13_weight", "w1"),
@@ -69,8 +66,6 @@ def load_model(model: nn.Module, path: str):
     for file in glob(os.path.join(path, "*.safetensors")):
         with safe_open(file, "pt", "cpu") as f:
             for weight_name in f.keys():
-                # print(f"Loading weight: {weight_name}")
-                # 1. MoE expert 파라미터 처리
                 m = moe_expert_pattern.fullmatch(weight_name)
                 if m:
                     layer_idx = int(m.group(1))
@@ -82,7 +77,6 @@ def load_model(model: nn.Module, path: str):
                         scale_name = f"model.layers.{layer_idx}.mlp.experts.{proj.replace('_blocks', '_scales')}"
                         scale = f.get_tensor(scale_name)
 
-                    # 실제 파라미터 이름: model.layers.<layer_idx>.mlp.experts.<param_name>
                     param_path = f"model.layers.{layer_idx}.mlp.experts.{param_name}"
                     moe_layer = find_fused_moe_layer(model, layer_idx)
                     assert moe_layer is not None, f"FusedMoE layer not found for layer index {layer_idx}"
@@ -104,11 +98,9 @@ def load_model(model: nn.Module, path: str):
                     tp_size = dist.get_world_size()
 
                     param = model.get_parameter(weight_name)
-                    # param = param.narrow(0, tp_rank * param.size(0) // tp_size, param.size(0) // tp_size)
                     param.data.copy_(f.get_tensor(weight_name).chunk(tp_size, 0)[tp_rank])
                     continue
 
-                # 2. 기존 packed_modules_mapping 처리
                 for k in packed_modules_mapping:
                     if k in weight_name:
                         v, shard_id = packed_modules_mapping[k]
@@ -118,11 +110,10 @@ def load_model(model: nn.Module, path: str):
                         weight_loader(param, f.get_tensor(weight_name), shard_id)
                         break
                 else:
-                    # 3. 일반 파라미터
                     try:
                         param = model.get_parameter(weight_name)
                         weight_loader = getattr(param, "weight_loader", default_weight_loader)
                         weight_loader(param, f.get_tensor(weight_name))
                     except AttributeError as e:
-                        print(f"[경고] 파라미터 {weight_name} 로딩 실패: {e}")
+                        print(f"[Warning] Parameter {weight_name} not found in the model.")
                         continue
