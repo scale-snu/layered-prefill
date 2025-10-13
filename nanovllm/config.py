@@ -22,9 +22,9 @@ class Config:
     # Scheduling mode settings
     # "chunked-prefill": Split prompt into chunks (default)
     # "orca": Process the entire prompt at once
-    # "staged-prefill": Split prompt into multiple stages
-    schedule_mode: str = "chunked-prefill" # or "orca" or "staged-prefill"
-    # Number of stages to use in staged-prefill mode
+    # "layered-prefill": Split prompt into multiple stages
+    schedule_mode: str = "chunked-prefill" # or "orca" or "layered-prefill"
+    # Number of stages to use in layered-prefill mode
     # Each stage creates a separate queue to manage sequences by stage
     # Example: num_stages=4 means processing in 4 stages
     num_stages: int = 4

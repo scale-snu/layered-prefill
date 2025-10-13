@@ -112,11 +112,11 @@ def parse_args() -> APIServerConfig:
                         help="Port for the API server.")
     parser.add_argument("--nccl-port", type=int, default=2333,
                         help="NCCL port for distributed training.")
-    parser.add_argument("--schedule-mode", type=str, default="staged-prefill",
-                        choices=["staged-prefill", "orca", "chunked-prefill"],
+    parser.add_argument("--schedule-mode", type=str, default="layered-prefill",
+                        choices=["layered-prefill", "orca", "chunked-prefill"],
                         help="Scheduling mode for the generation.")
     parser.add_argument("--num-stages", type=int, default=2,
-                        help="Number of stages for staged prefill scheduling.")
+                        help="Number of stages for layered prefill scheduling.")
     args = parser.parse_args()
 
     return args

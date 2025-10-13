@@ -126,15 +126,6 @@ class Qwen3MLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        """
-        MLP 순전파
-
-        Args:
-            x: 입력 텐서
-
-        Returns:
-            MLP 출력
-        """
         gate_up = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x = self.down_proj(x)
@@ -295,7 +286,7 @@ class Qwen3Model(nn.Module):
     ) -> torch.Tensor:
         context = get_context()
 
-        len_staged_prefill = context.len_prefill if context.is_prefill else 0
+        len_layered_prefill = context.len_prefill if context.is_prefill else 0
 
         hidden_states = self.embed_tokens(input_ids)
 
@@ -312,14 +303,14 @@ class Qwen3Model(nn.Module):
             pre_layers = tuple(np.arange(min(context.prefill_compute_layers)).tolist())
             post_layers = tuple(np.arange(max(context.prefill_compute_layers) + 1, len(self.layers)).tolist())
 
-            bs = hidden_states[len_staged_prefill:].size(0)
+            bs = hidden_states[len_layered_prefill:].size(0)
             if bs > 0:
                 if self.is_graph_captured and bs <= max(self.graph_bs):
-                    self.graph_vars["hidden_states"][:bs] = hidden_states[len_staged_prefill:]
-                    self.graph_vars["residual"][:bs] = residual[len_staged_prefill:]
-                    self.graph_vars["positions"][:bs] = positions[len_staged_prefill:]
+                    self.graph_vars["hidden_states"][:bs] = hidden_states[len_layered_prefill:]
+                    self.graph_vars["residual"][:bs] = residual[len_layered_prefill:]
+                    self.graph_vars["positions"][:bs] = positions[len_layered_prefill:]
                     self.graph_vars["slot_mapping"].fill_(-1)
-                    self.graph_vars["slot_mapping"][:bs] = context.slot_mapping[len_staged_prefill:]
+                    self.graph_vars["slot_mapping"][:bs] = context.slot_mapping[len_layered_prefill:]
 
                     is_prefill = context.is_prefill
                     len_prefill = context.len_prefill
@@ -348,8 +339,8 @@ class Qwen3Model(nn.Module):
                             post_graph = self.post_graphs[graph_idx]
                             post_graph.replay()
 
-                    hidden_states[len_staged_prefill:] = self.graph_vars["hidden_states"][:bs]
-                    residual[len_staged_prefill:] = self.graph_vars["residual"][:bs]
+                    hidden_states[len_layered_prefill:] = self.graph_vars["hidden_states"][:bs]
+                    residual[len_layered_prefill:] = self.graph_vars["residual"][:bs]
 
                     context.is_prefill = is_prefill
                     context.len_prefill = len_prefill
@@ -362,11 +353,11 @@ class Qwen3Model(nn.Module):
                     slot_mapping = None
                     if context.slot_mapping is not None:
                         slot_mapping = context.slot_mapping.clone()
-                        context.slot_mapping = slot_mapping[len_staged_prefill:]
+                        context.slot_mapping = slot_mapping[len_layered_prefill:]
 
-                    _hidden_states = hidden_states[len_staged_prefill:]
-                    _positions = positions[len_staged_prefill:]
-                    _residual = residual[len_staged_prefill:]
+                    _hidden_states = hidden_states[len_layered_prefill:]
+                    _positions = positions[len_layered_prefill:]
+                    _residual = residual[len_layered_prefill:]
                     for layer_idx in pre_layers:
                         if layer_idx == 0:
                             _hidden_states, _residual = self.layers[layer_idx](
@@ -380,8 +371,8 @@ class Qwen3Model(nn.Module):
                                 _hidden_states,
                                 _residual
                             )
-                    hidden_states[len_staged_prefill:] = _hidden_states
-                    residual[len_staged_prefill:] = _residual
+                    hidden_states[len_layered_prefill:] = _hidden_states
+                    residual[len_layered_prefill:] = _residual
 
                     context.is_prefill = is_prefill
                     context.len_prefill = len_prefill
@@ -435,14 +426,14 @@ class Qwen3Model(nn.Module):
                         hidden_states[:] = _hidden_states
                         residual[:] = _residual
 
-            bs = hidden_states[len_staged_prefill:].size(0)
+            bs = hidden_states[len_layered_prefill:].size(0)
             if bs > 0:
                 if self.is_graph_captured and bs <= max(self.graph_bs):
-                    self.graph_vars["hidden_states"][:bs] = hidden_states[len_staged_prefill:]
-                    self.graph_vars["positions"][:bs] = positions[len_staged_prefill:]
-                    self.graph_vars["residual"][:bs] = residual[len_staged_prefill:]
+                    self.graph_vars["hidden_states"][:bs] = hidden_states[len_layered_prefill:]
+                    self.graph_vars["positions"][:bs] = positions[len_layered_prefill:]
+                    self.graph_vars["residual"][:bs] = residual[len_layered_prefill:]
                     self.graph_vars["slot_mapping"].fill_(-1)
-                    self.graph_vars["slot_mapping"][:bs] = context.slot_mapping[len_staged_prefill:]
+                    self.graph_vars["slot_mapping"][:bs] = context.slot_mapping[len_layered_prefill:]
 
                     is_prefill = context.is_prefill
                     len_prefill = context.len_prefill
@@ -471,8 +462,8 @@ class Qwen3Model(nn.Module):
                             post_graph = self.post_graphs[graph_idx]
                             post_graph.replay()
 
-                    hidden_states[len_staged_prefill:] = self.graph_vars["hidden_states"][:bs]
-                    residual[len_staged_prefill:] = self.graph_vars["residual"][:bs]
+                    hidden_states[len_layered_prefill:] = self.graph_vars["hidden_states"][:bs]
+                    residual[len_layered_prefill:] = self.graph_vars["residual"][:bs]
 
                     context.is_prefill = is_prefill
                     context.len_prefill = len_prefill
@@ -485,11 +476,11 @@ class Qwen3Model(nn.Module):
                     slot_mapping = None
                     if context.slot_mapping is not None:
                         slot_mapping = context.slot_mapping.clone()
-                        context.slot_mapping = slot_mapping[len_staged_prefill:]
+                        context.slot_mapping = slot_mapping[len_layered_prefill:]
 
-                    _hidden_states = hidden_states[len_staged_prefill:]
-                    _positions = positions[len_staged_prefill:]
-                    _residual = residual[len_staged_prefill:]
+                    _hidden_states = hidden_states[len_layered_prefill:]
+                    _positions = positions[len_layered_prefill:]
+                    _residual = residual[len_layered_prefill:]
                     for layer_idx in post_layers:
                         if layer_idx == 0:
                             _hidden_states, _residual = self.layers[layer_idx](
@@ -503,8 +494,8 @@ class Qwen3Model(nn.Module):
                                 _hidden_states,
                                 _residual,
                             )
-                    hidden_states[len_staged_prefill:] = _hidden_states
-                    residual[len_staged_prefill:] = _residual
+                    hidden_states[len_layered_prefill:] = _hidden_states
+                    residual[len_layered_prefill:] = _residual
 
                     context.is_prefill = is_prefill
                     context.len_prefill = len_prefill
@@ -515,12 +506,12 @@ class Qwen3Model(nn.Module):
                 hidden_states[:] = _hidden_states
                 residual[:] = _residual
             else:
-                if hidden_states[len_staged_prefill:].size(0) > 0:
+                if hidden_states[len_layered_prefill:].size(0) > 0:
                     _hidden_states, _residual = self.norm(
-                        hidden_states[len_staged_prefill:], residual[len_staged_prefill:]
+                        hidden_states[len_layered_prefill:], residual[len_layered_prefill:]
                     )
-                    hidden_states[len_staged_prefill:] = _hidden_states
-                    residual[len_staged_prefill:] = _residual
+                    hidden_states[len_layered_prefill:] = _hidden_states
+                    residual[len_layered_prefill:] = _residual
         else:
             residual = None
             bs = hidden_states.size(0)
@@ -593,7 +584,7 @@ class Qwen3Model(nn.Module):
         bs = 128
         # self.graph_bs = []
         # bs = 1
-        while bs <= min(max_num_batched_tokens, 8192):
+        while bs <= min(max_num_batched_tokens, 1024):
             self.graph_bs.append(bs)
             bs = bs * 2
         self.graph_bs = [bs for bs in self.graph_bs if bs <= max_num_batched_tokens]
@@ -606,7 +597,7 @@ class Qwen3Model(nn.Module):
 
         for layer_idx in range(len(self.layers)):
             for bs in reversed(self.graph_bs):
-                if layer_idx == 0 or schedule_mode == "staged-prefill":
+                if layer_idx == 0 or schedule_mode == "layered-prefill":
                     pre_graph = torch.cuda.CUDAGraph()
 
                     _positions = positions[:bs]
@@ -639,7 +630,7 @@ class Qwen3Model(nn.Module):
                         self.pre_graph_pool = pre_graph.pool()
                     self.pre_graphs[(layer_idx, bs)] = pre_graph
 
-                if layer_idx == len(self.layers) - 1 or schedule_mode == "staged-prefill":
+                if layer_idx == len(self.layers) - 1 or schedule_mode == "layered-prefill":
                     post_graph = torch.cuda.CUDAGraph()
 
                     _attn_o = attn_o[:bs]
@@ -710,12 +701,6 @@ class Qwen3ForCausalLM(nn.Module):
         self,
         config: Qwen3Config
     ) -> None:
-        """
-        Qwen3ForCausalLM 초기화
-
-        Args:
-            config: Qwen3 설정 객체
-        """
         super().__init__()
         self.model = Qwen3Model(config)
 

@@ -18,7 +18,7 @@ class Scheduler:
         self.schedule_mode = config.schedule_mode
         self.max_model_len = config.max_model_len
 
-        if self.schedule_mode == "staged-prefill":
+        if self.schedule_mode == "layered-prefill":
             self.stage_queue: list[deque[Sequence]] = [deque() for _ in range(config.num_stages)]
             self.current_stage = -1
 
@@ -39,8 +39,8 @@ class Scheduler:
             return self.chunked_prefill_schedule()
         elif self.schedule_mode == "orca":
             return self.orca_schedule()
-        elif self.schedule_mode == "staged-prefill":
-            return self.staged_prefill_schedule()
+        elif self.schedule_mode == "layered-prefill":
+            return self.layered_prefill_schedule()
         else:
             raise ValueError(f"Unknown schedule mode: {self.schedule_mode}")
 
@@ -223,7 +223,7 @@ class Scheduler:
         else:
             raise ValueError(f"Unsupported number of stages: {len(self.stage_queue)}")
 
-    def staged_prefill_schedule(self) -> list[Sequence]:
+    def layered_prefill_schedule(self) -> list[Sequence]:
         # prefill
         prefill_scheduled_seqs = []
         decode_scheduled_seqs = []
@@ -342,7 +342,7 @@ class Scheduler:
         assert len(seqs) == len(token_ids), f"Number of sequences and token IDs must match. ({len(seqs)} != {len(token_ids)})"
         for seq, token_id in zip(seqs, token_ids):
             if seq.status == SequenceStatus.PREFILLING:
-                if self.schedule_mode == "staged-prefill":
+                if self.schedule_mode == "layered-prefill":
                     if seq.stage == seq.num_stages - 1:
                         seq.num_processed_tokens += seq.num_tokens_to_process
                         if seq.num_processed_tokens >= len(seq):

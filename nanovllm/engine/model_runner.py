@@ -237,7 +237,7 @@ class ModelRunner:
                 if seq.stage != -1:
                     if prefill_compute_layers is not None:
                         if prefill_compute_layers != set(np.array_split(np.arange(self.num_layers), seq.num_stages)[seq.stage].tolist()):
-                            raise ValueError("In Staged-Prefill mode, all sequences must have the same stage.")
+                            raise ValueError("In Layered Prefill mode, all sequences must have the same stage.")
                     else:
                         prefill_compute_layers = set(np.array_split(np.arange(self.num_layers), seq.num_stages)[seq.stage].tolist())
 
