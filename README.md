@@ -19,7 +19,11 @@ CCACHE_NOHASHDIR="true" uv pip install -e . --no-build-isolation --verbose --ref
 ## How to run
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python nanovllm/entrypoints/api_server.py --model /data/cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/9c925d64d72725edaf899c6cb9c377fd0709d9c5/ --max-num-batched-tokens 256 --max-num-seqs 256 --max-model-len 32768 --gpu-memory-utilization 0.9 --tensor-parallel-size 2 --schedule-mode chunked-prefill --num-stages 1
+# chunked prefill
+CUDA_VISIBLE_DEVICES=0 python nanovllm/entrypoints/api_server.py --model /data/cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/9c925d64d72725edaf899c6cb9c377fd0709d9c5/ --max-num-batched-tokens 512 --max-num-seqs 256 --max-model-len 32768 --gpu-memory-utilization 0.9 --tensor-parallel-size 2 --schedule-mode chunked-prefill --num-stages 1
+
+# layered prefill
+CUDA_VISIBLE_DEVICES=0 python nanovllm/entrypoints/api_server.py --model /data/cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/9c925d64d72725edaf899c6cb9c377fd0709d9c5/ --max-num-batched-tokens 8192 --max-num-seqs 256 --max-model-len 32768 --gpu-memory-utilization 0.9 --tensor-parallel-size 2 --schedule-mode layered-prefill --num-stages 12
 ```
 
 ## Algorithm
