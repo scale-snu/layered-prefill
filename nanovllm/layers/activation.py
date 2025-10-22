@@ -2,7 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from nanovllm import ops
+from nanovllm.layers import custom_ops as ops
 
 
 class SiluAndMul(nn.Module):

@@ -64,6 +64,7 @@ class Attention(nn.Module):
 
         return self.forward_attention(o, q, k, v, sinks)
 
+    @torch.compile(dynamic=True)
     def forward_attention(self, o: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, sinks: None | torch.Tensor = None) -> torch.Tensor:
         context = get_context()
 
@@ -89,7 +90,7 @@ class Attention(nn.Module):
                 window_size=(self.window_size, -1),
                 fa_version=self.fa_version,
                 s_aux=sinks,
-                num_splits=32,
+                num_splits=32 if self.fa_version == 3 else 1,
             )
 
         if context.decode_block_tables is not None:
@@ -98,7 +99,7 @@ class Attention(nn.Module):
                 out=o[context.len_prefill:],
                 max_seqlen_q=1,
                 cu_seqlens_q=self.cu_seqlens_q_cache[:context.decode_block_tables.size(0) + 1],
-                max_seqlen_k=context.max_seqlen_k,
+                max_seqlen_k=context.max_seqlen_k_dec,
                 seqused_k=context.context_lens,
                 softmax_scale=self.scale,
                 causal=True,
@@ -106,7 +107,7 @@ class Attention(nn.Module):
                 window_size=(self.window_size, -1),
                 fa_version=self.fa_version,
                 s_aux=sinks,
-                num_splits=32,
+                num_splits=32 if self.fa_version == 3 else 1,
             )
 
         o = o.view(-1, self.num_heads * self.head_dim)

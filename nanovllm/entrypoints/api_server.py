@@ -117,6 +117,9 @@ def parse_args() -> APIServerConfig:
                         help="Scheduling mode for the generation.")
     parser.add_argument("--num-stages", type=int, default=2,
                         help="Number of stages for layered prefill scheduling.")
+    parser.add_argument("--moe-dtype", type=str, default=None,
+                        choices=["float16", "bfloat16", "mxfp4"],
+                        help="Data type for MoE parameters.")
     args = parser.parse_args()
 
     return args
@@ -139,6 +142,7 @@ if __name__ == "__main__":
         nccl_port=args.nccl_port,
         schedule_mode=args.schedule_mode,
         num_stages=args.num_stages,
+        moe_dtype=args.moe_dtype,
     )
 
     # Create the system config from the config.

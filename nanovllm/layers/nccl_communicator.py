@@ -202,6 +202,7 @@ def _get_nccl_communicator():
             _nccl_comm.init_comm(dist.get_world_size(), dist.get_rank())
     return _nccl_comm
 
+@torch.compiler.disable(recursive=True)
 def tensor_model_parallel_all_reduce(tensor: torch.Tensor) -> torch.Tensor:
     """Tensor Parallel all-reduce using direct NCCL calls for CUDA graph compatibility.
 

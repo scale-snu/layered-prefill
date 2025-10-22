@@ -26,7 +26,7 @@ class LinearBase(nn.Module):
         self.tp_rank = dist.get_rank()
         self.tp_size = dist.get_world_size()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, out: None | torch.Tensor = None) -> torch.Tensor:
         raise NotImplementedError
 
 
@@ -50,7 +50,13 @@ class ReplicatedLinear(LinearBase):
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
         param.data.copy_(loaded_weight)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, out: None | torch.Tensor = None) -> torch.Tensor:
+        if out is not None:
+            if self.bias is not None:
+                torch.addmm(self.bias, out, self.weight.t(), out=out)
+            else:
+                torch.matmul(x, self.weight.t(), out=out)
+            return out
         return F.linear(x, self.weight, self.bias)
 
 
@@ -81,7 +87,13 @@ class ColumnParallelLinear(LinearBase):
         loaded_weight = loaded_weight.narrow(self.tp_dim, start_idx, shard_size)
         param_data.copy_(loaded_weight)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, out: None | torch.Tensor = None) -> torch.Tensor:
+        if out is not None:
+            if self.bias is not None:
+                torch.addmm(self.bias, x, self.weight.t(), out=out)
+            else:
+                torch.matmul(x, self.weight.t(), out=out)
+            return out
         return F.linear(x, self.weight, self.bias)
 
 
@@ -120,9 +132,14 @@ class QKVParallelLinear(ColumnParallelLinear):
         self.total_num_kv_heads = total_num_kv_heads or total_num_heads
         tp_size = dist.get_world_size()
         self.num_heads = divide(self.total_num_heads, tp_size)
-        self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
+        if self.total_num_kv_heads >= tp_size:
+            self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
+            self.num_kv_heads_replicate = 1
+        else:
+            self.num_kv_heads = 1
+            self.num_kv_heads_replicate = tp_size // self.total_num_kv_heads
         input_size = hidden_size
-        output_size = (self.total_num_heads + 2 * self.total_num_kv_heads) * self.head_size
+        output_size = (self.total_num_heads + 2 * self.total_num_kv_heads * self.num_kv_heads_replicate) * self.head_size
         super().__init__(input_size, output_size, bias)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, loaded_shard_id: str):
@@ -137,8 +154,14 @@ class QKVParallelLinear(ColumnParallelLinear):
         else:
             shard_size = self.num_kv_heads * self.head_size
             shard_offset = self.num_heads * self.head_size + self.num_kv_heads * self.head_size
+
+        if loaded_shard_id == "q":
+            loaded_weight = loaded_weight.chunk(self.tp_size, self.tp_dim)[self.tp_rank]
+        else:
+            loaded_weight = loaded_weight.chunk(self.tp_size // self.num_kv_heads_replicate, self.tp_dim)[self.tp_rank // self.num_kv_heads_replicate]
+
         param_data = param_data.narrow(self.tp_dim, shard_offset, shard_size)
-        loaded_weight = loaded_weight.chunk(self.tp_size, self.tp_dim)[self.tp_rank]
+
         param_data.copy_(loaded_weight)
 
 
@@ -173,7 +196,16 @@ class RowParallelLinear(LinearBase):
         loaded_weight = loaded_weight.narrow(self.tp_dim, start_idx, shard_size)
         param_data.copy_(loaded_weight)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, out: None | torch.Tensor = None) -> torch.Tensor:
+        if out is not None:
+            if self.bias is not None and self.tp_rank == 0:
+                torch.addmm(self.bias, out, self.weight.t(), out=out)
+            else:
+                torch.matmul(x, self.weight.t(), out=out)
+            if self.tp_size > 1:
+                tensor_model_parallel_all_reduce(out)
+            return out
+
         y = F.linear(x, self.weight, self.bias if self.tp_rank == 0 else None)
         if self.tp_size > 1:
             y = tensor_model_parallel_all_reduce(y)

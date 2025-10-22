@@ -17,7 +17,7 @@ class Config:
     hf_config: AutoConfig | None = None
     eos: int = -1
     nccl_port: int = 2333
-    kvcache_block_size: int = 256
+    kvcache_block_size: int = 16
     num_kvcache_blocks: int = -1
     # Scheduling mode settings
     # "chunked-prefill": Split prompt into chunks (default)
@@ -27,14 +27,17 @@ class Config:
     # Number of stages to use in layered-prefill mode
     # Each stage creates a separate queue to manage sequences by stage
     # Example: num_stages=4 means processing in 4 stages
-    num_stages: int = 4
+    num_stages: int = 1
     rpc_base_path: str = "/tmp"
+    moe_dtype: torch.dtype = torch.float16
 
     def __post_init__(self):
         # assert os.path.isdir(self.model)
-        assert self.kvcache_block_size % 256 == 0
+        assert self.kvcache_block_size % 16 == 0
         assert 1 <= self.tensor_parallel_size <= 8
         self.hf_config = AutoConfig.from_pretrained(self.model)
         self.hf_config.torch_dtype = self.hf_config.torch_dtype or torch.bfloat16
+        self.hf_config.moe_dtype = self.moe_dtype
+        self.hf_config.max_num_batched_tokens = self.max_num_batched_tokens
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)
         # assert self.max_num_batched_tokens >= self.max_model_len

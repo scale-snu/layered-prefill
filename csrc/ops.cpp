@@ -4,6 +4,8 @@
 #include <tuple>
 #include <cstdint>
 
+#include "moe/scalar_type.h"
+
 
 void rotary_embedding(
   torch::Tensor& positions,
@@ -94,6 +96,25 @@ std::tuple<fptr_t, torch::Tensor> allocate_shared_buffer_and_handle(
 fptr_t open_mem_handle(torch::Tensor& mem_handle);
 void free_shared_buffer(fptr_t buffer);
 
+torch::Tensor moe_wna16_marlin_gemm(
+    torch::Tensor& a, std::optional<torch::Tensor> const& c_or_none,
+    torch::Tensor& b_q_weight,
+    std::optional<torch::Tensor> const& b_bias_or_none, torch::Tensor& b_scales,
+    std::optional<torch::Tensor> const& global_scale_or_none,
+    std::optional<torch::Tensor> const& b_zeros_or_none,
+    std::optional<torch::Tensor> const& g_idx_or_none,
+    std::optional<torch::Tensor> const& perm_or_none, torch::Tensor& workspace,
+    torch::Tensor& sorted_token_ids, torch::Tensor& expert_ids,
+    torch::Tensor& num_tokens_past_padded, torch::Tensor& topk_weights,
+    int64_t moe_block_size, int64_t top_k, bool mul_topk_weights, bool is_ep,
+    vllm::ScalarTypeId const& b_q_type_id, int64_t size_m, int64_t size_n,
+    int64_t size_k, bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
+    bool is_zp_float);
+
+torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
+                                 int64_t size_k, int64_t size_n,
+                                 int64_t num_bits);
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def(
     "rotary_embedding",
@@ -156,4 +177,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("open_mem_handle", &open_mem_handle);
 
   m.def("free_shared_buffer", &free_shared_buffer);
+
+  m.def("moe_wna16_marlin_gemm", &moe_wna16_marlin_gemm);
+  m.def("gptq_marlin_repack", &gptq_marlin_repack);
 }

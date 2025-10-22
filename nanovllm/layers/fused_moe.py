@@ -11,13 +11,225 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 from torch.nn.parameter import UninitializedParameter
+# from flashinfer.fused_moe import cutlass_fused_moe as flashinfer_cutlass_fused_moe
 
 from nanovllm.layers.custom_all_reduce import tensor_model_parallel_all_reduce
 # from nanovllm.layers.nccl_communicator import tensor_model_parallel_all_reduce
 from nanovllm.layers.for_moe.utils import set_weight_attrs
 from nanovllm.layers.for_moe.fused_moe import fused_experts
+from nanovllm.layers.for_moe.fused_moe_fp4 import fused_marlin_moe
+from nanovllm.utils.scalar_type import scalar_types
+from nanovllm import ops
+from nanovllm.utils.utils import ForkedPdb
 
 fused_moe_pallas = None  # type: ignore
+
+
+def get_scale_perms():
+    scale_perm: list[int] = []
+    for i in range(8):
+        scale_perm.extend([i + 8 * j for j in range(8)])
+    scale_perm_single: list[int] = []
+    for i in range(4):
+        scale_perm_single.extend(
+            [2 * i + j for j in [0, 1, 8, 9, 16, 17, 24, 25]])
+    return scale_perm, scale_perm_single
+
+
+def marlin_permute_bias(s: torch.Tensor) -> torch.Tensor:
+    origin_shape = s.shape
+    _, scale_perm_single = get_scale_perms()
+    s = s.reshape((-1, len(scale_perm_single)))[:, scale_perm_single]
+    return s.reshape(*origin_shape).contiguous()
+
+
+def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
+                          group_size: int) -> torch.Tensor:
+
+    scale_perm, scale_perm_single = get_scale_perms()
+    if group_size < size_k and group_size != -1:
+        s = s.reshape((-1, len(scale_perm)))[:, scale_perm]
+    else:
+        s = s.reshape((-1, len(scale_perm_single)))[:, scale_perm_single]
+    s = s.reshape((-1, size_n)).contiguous()
+
+    return s
+
+
+def marlin_make_workspace_new(device: torch.device,
+                              max_blocks_per_sm: int = 1) -> torch.Tensor:
+    # In the new marlin kernel, we use the num of threadblocks as workspace
+    # size. The num of threadblocks is sms_count * max_blocks_per_sm.
+    sms = torch.cuda.get_device_properties(device).multi_processor_count
+    return torch.zeros(sms * max_blocks_per_sm,
+                       dtype=torch.int,
+                       device=device,
+                       requires_grad=False)
+
+
+def nvfp4_marlin_process_scales(marlin_scales):
+    if not (marlin_scales >= 0).all():
+        print(
+            "NVFP4 Marlin assumes the scales to be >=0, but has encountered "
+            "negative scales. Accuracy will likely be degraded. This is "
+            "because it changes the scales from FP8-S1E4M3 to a special "
+            "FP8-S0E5M3 format to speedup the dequantization.")
+
+    # convert to half first, we would convert to fp8 later
+    marlin_scales = marlin_scales.to(torch.half)
+
+    # 8 is the number of scale number using by one thread
+    marlin_scales = marlin_scales.view(marlin_scales.size(0) // 2, 2, -1, 8)
+    marlin_scales = marlin_scales.permute(0, 2, 1, 3).reshape(
+        marlin_scales.size(0) * 2, -1)
+
+    # fit the layout of fp8 dequantization
+    marlin_scales = marlin_scales.view(-1, 4)[:, [0, 2, 1, 3]].view(
+        marlin_scales.size(0), -1)
+
+    # We assume that weight_scale (FP8-S1E4M3) is always greater
+    # than or equal to 0. So we can convert
+    # (weight_scale * (2 ** 7) to a special FP8-S0E5M3 format.
+    # After multiplying by 2 ** 7, the top bit of FP8-S0E5M3 would always be 1
+    # when weight_scale > 0. This allows us to have an exponent bias
+    # closer to zero after dequantization.
+
+    marlin_scales = (marlin_scales * (2**7)).view(torch.int16) << 1
+    marlin_scales = marlin_scales.view(torch.float8_e4m3fn)
+    marlin_scales = marlin_scales[:, 1::2].contiguous()
+
+    return marlin_scales
+
+
+def mxfp4_marlin_process_scales(marlin_scales):
+    # 8 is the number of scale number using by one thread
+    marlin_scales = marlin_scales.view(marlin_scales.size(0) // 2, 2, -1, 8)
+    marlin_scales = marlin_scales.permute(0, 2, 1, 3).reshape(
+        marlin_scales.size(0) * 2, -1)
+
+    # fit the layout of fp8 dequantization
+    marlin_scales = marlin_scales.view(-1, 4)[:, [0, 2, 1, 3]].view(
+        marlin_scales.size(0), -1)
+    marlin_scales = marlin_scales.to(torch.float8_e8m0fnu)
+    return marlin_scales
+
+
+def nvfp4_marlin_process_global_scale(global_scale):
+    assert global_scale.dtype in [torch.half, torch.bfloat16]
+    fp4_exponent = 2
+    if global_scale.dtype == torch.half:
+        target_exponent = 5
+    elif global_scale.dtype == torch.bfloat16:
+        target_exponent = 8
+    # exponent_bias_fp16 = 2 ** 4 - 2 ** 1 = 14
+    # exponent_bias_bf16 = 2 ** 7 - 2 ** 1 = 126
+    exponent_bias = 2**(target_exponent - 1) - 2**(fp4_exponent - 1)
+    return global_scale * (2.0**(exponent_bias - 7))
+
+
+def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
+    print(
+        "Your GPU does not have native support for FP4 computation but "
+        "FP4 quantization is being used. Weight-only FP4 compression will "
+        "be used leveraging the Marlin kernel. This may degrade "
+        "performance for compute-heavy workloads.")
+
+    is_nvfp4 = hasattr(layer, "w13_weight_scale_2")
+    group_size = 16 if is_nvfp4 else 32
+
+    e = layer.num_experts
+    k = layer.hidden_size
+    n = layer.intermediate_size_per_partition
+
+    # WORKSPACE
+    device = layer.w13_weight.device
+    param_dtype = torch.get_default_dtype()
+    layer.workspace = marlin_make_workspace_new(device, 4)
+    perm = torch.empty(0, dtype=torch.int, device=device)
+
+    # WEIGHT
+    # Repack weights to marlin format
+    for name in ["w13_weight", "w2_weight"]:
+        weight = getattr(layer, name)
+        tensor_list = []
+        if "w13" in name:
+            size_n, size_k = n * 2, k
+        else:
+            size_n, size_k = k, n
+
+        assert weight.shape == (e, size_n, size_k // 2)
+
+        for i in range(e):
+            qweight = weight[i].view(torch.int32).T.contiguous()
+
+            marlin_qweight = ops.gptq_marlin_repack(qweight,
+                                                    perm,
+                                                    size_k,
+                                                    size_n,
+                                                    4)
+            tensor_list.append(marlin_qweight)
+
+        weight = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
+        weight = torch.nn.Parameter(weight, requires_grad=False)
+
+        setattr(layer, name, weight)
+
+    # WEIGHT SCALES
+    # Permute scales
+    for name in ["w13", "w2"]:
+        scales = getattr(layer, name + "_weight_scale")
+        if not is_nvfp4:
+            scales = scales.view(torch.float8_e8m0fnu)
+        scales = scales.to(param_dtype)
+        if is_nvfp4:
+            global_scale = getattr(layer,
+                                   name + "_weight_scale_2").to(param_dtype)
+
+        tensor_list = []
+        if "w13" in name:
+            size_n, size_k = n * 2, k
+        else:
+            size_n, size_k = k, n
+
+        for i in range(e):
+            scale = scales[i].T
+
+            marlin_scales = marlin_permute_scales(s=scale,
+                                                  size_k=size_k,
+                                                  size_n=size_n,
+                                                  group_size=group_size)
+            if is_nvfp4:
+                marlin_scales = nvfp4_marlin_process_scales(marlin_scales)
+            else:
+                marlin_scales = mxfp4_marlin_process_scales(marlin_scales)
+            tensor_list.append(marlin_scales)
+
+        scales = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
+        scales = torch.nn.Parameter(scales, requires_grad=False)
+        setattr(layer, name + "_weight_scale", scales)
+
+        if is_nvfp4:
+            global_scale = nvfp4_marlin_process_global_scale(global_scale)
+            global_scale = torch.nn.Parameter(global_scale,
+                                              requires_grad=False)
+            setattr(layer, name + "_weight_scale_2", global_scale)
+
+    # BIAS
+    # Permute bias
+    for name in ["w13_bias", "w2_bias"]:
+        if not hasattr(layer, name):
+            continue
+        bias = getattr(layer, name).to(param_dtype)
+
+        tensor_list = []
+        for i in range(e):
+            expert_bias = bias[i]
+
+            tensor_list.append(marlin_permute_bias(expert_bias))
+
+        bias = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
+        bias = torch.nn.Parameter(bias, requires_grad=False)
+        setattr(layer, name, bias)
 
 
 @dataclass
@@ -105,6 +317,308 @@ class FusedMoEMethodBase(ABC):
 # count_tensor: torch.Tensor
 # count: torch.Tensor
 
+class Mxfp4MoEMethod(FusedMoEMethodBase):
+    """MoE method with mxfp4 quantization."""
+
+    def __init__(self, moe: MoEConfig):
+        super().__init__()
+        self.topk_indices_dtype = None
+        self.moe = moe
+        self.max_capture_size = moe.max_num_tokens
+
+    def create_weights(self, layer: torch.nn.Module, num_experts: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
+                       params_dtype: torch.dtype,
+                       has_bias: bool = False,
+                       **extra_weight_attrs):
+        self.num_experts = num_experts
+        weight_dtype = torch.uint8
+        scale_dtype = torch.uint8
+
+        mxfp4_block = 32
+
+        intermediate_size_per_partition_after_pad = \
+            intermediate_size_per_partition
+        intermediate_size_per_partition_after_pad = (
+            (intermediate_size_per_partition_after_pad + 128 - 1)
+            // 128 * 128
+        )
+        hidden_size = (hidden_size + 256 - 1) // 256 * 256
+
+        layer.params_dtype = params_dtype
+        layer.num_experts = num_experts
+        layer.hidden_size = hidden_size
+        layer.intermediate_size_per_partition = \
+            intermediate_size_per_partition_after_pad
+
+        self.intermediate_size = intermediate_size_per_partition_after_pad
+        self.hidden_size = hidden_size
+
+        # Fused gate_up_proj (column parallel)
+        w13_weight = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                2 * intermediate_size_per_partition_after_pad,
+                hidden_size // 2,
+                dtype=weight_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        w13_weight_scale = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                2 * intermediate_size_per_partition_after_pad,
+                hidden_size // mxfp4_block,
+                dtype=scale_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+
+        w13_bias = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                2 * intermediate_size_per_partition_after_pad,
+                dtype=torch.bfloat16,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_bias", w13_bias)
+        set_weight_attrs(w13_bias, extra_weight_attrs)
+
+        # down_proj (row parallel)
+        w2_weight = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition_after_pad // 2,
+                dtype=weight_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        w2_weight_scale = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition_after_pad // mxfp4_block,
+                dtype=scale_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+
+        w2_bias = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                hidden_size,
+                dtype=torch.bfloat16,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_bias", w2_bias)
+        set_weight_attrs(w2_bias, extra_weight_attrs)
+
+    def process_weights_after_loading(self, layer):
+        prepare_moe_fp4_layer_for_marlin(layer)
+
+    #     layer.gemm1_alpha = torch.nn.Parameter(torch.tensor(
+    #         [1.702] * self.num_experts, dtype=torch.float32).cuda(),
+    #                                   requires_grad=False)
+    #     layer.gemm1_beta = torch.nn.Parameter(torch.tensor(
+    #         [1.0] * self.num_experts, dtype=torch.float32).cuda(),
+    #                                  requires_grad=False)
+    #     layer.gemm1_clamp_limit = torch.nn.Parameter(torch.tensor(
+    #         [7.0] * self.num_experts, dtype=torch.float32).cuda(),
+    #                                         requires_grad=False)
+
+    #     sf_block_size = 32  # mxfp4 block size
+
+    #     # Common shape assertions
+    #     assert (layer.w13_weight.dim() == 3
+    #             and layer.w13_weight.shape[0] == self.num_experts
+    #             and layer.w13_weight.shape[1] == self.intermediate_size * 2
+    #             and layer.w13_weight.shape[2] == self.hidden_size // 2)
+    #     assert (layer.w13_weight_scale.dim() == 3
+    #             and layer.w13_weight_scale.shape[0] == self.num_experts
+    #             and layer.w13_weight_scale.shape[1]
+    #             == self.intermediate_size * 2
+    #             and layer.w13_weight_scale.shape[2]
+    #             == self.hidden_size // sf_block_size), \
+    #         f"{layer.w13_weight_scale.shape} vs {self.num_experts}, {self.intermediate_size * 2}, {self.hidden_size // sf_block_size}"
+    #     assert (layer.w2_weight.dim() == 3
+    #             and layer.w2_weight.shape[0] == self.num_experts
+    #             and layer.w2_weight.shape[1] == self.hidden_size and
+    #             layer.w2_weight.shape[2] == self.intermediate_size // 2)
+    #     assert (layer.w2_weight_scale.dim() == 3
+    #             and layer.w2_weight_scale.shape[1] == self.hidden_size
+    #             and layer.w2_weight_scale.shape[2]
+    #             == self.intermediate_size // sf_block_size)
+    #     assert (layer.w13_bias.dim() == 2
+    #             and layer.w13_bias.shape[0] == self.num_experts
+    #             and layer.w13_bias.shape[1] == self.intermediate_size * 2)
+    #     assert (layer.w2_bias.dim() == 2
+    #             and layer.w2_bias.shape[0] == self.num_experts
+    #             and layer.w2_bias.shape[1] == self.hidden_size)
+
+    #     # De-interleave and swap for w13 weight, bias, and scales
+    #     w13_w = layer.w13_weight.data
+    #     gate_w, up_w = w13_w[:, ::2, :], w13_w[:, 1::2, :]
+    #     deinterleaved_w13_w = torch.cat([gate_w, up_w], dim=1)
+    #     w1_w, w3_w = torch.chunk(deinterleaved_w13_w, 2, dim=1)
+    #     w13_weight_swapped = torch.cat([w3_w, w1_w], dim=1)
+
+    #     w13_b = layer.w13_bias.data.to(torch.float32)
+    #     gate_b, up_b = w13_b[:, ::2], w13_b[:, 1::2]
+    #     deinterleaved_w13_b = torch.cat([gate_b, up_b], dim=1)
+    #     b1, b3 = torch.chunk(deinterleaved_w13_b, 2, dim=-1)
+    #     w13_bias_swapped = torch.cat([b3, b1], dim=-1).to(torch.bfloat16)
+
+    #     w13_s = layer.w13_weight_scale.data
+    #     gate_s, up_s = w13_s[:, ::2, :], w13_s[:, 1::2, :]
+    #     deinterleaved_w13_s = torch.cat([gate_s, up_s], dim=1)
+    #     s1, s3 = torch.chunk(deinterleaved_w13_s, 2, dim=1)
+    #     w13_scale_swapped = torch.cat([s3, s1], dim=1)
+
+    #     def _interleave_mxfp4_cutlass_sm90(w):
+    #         w_shape = w.shape
+    #         w_interleaved = w.reshape(w_shape[0], w_shape[1],
+    #                                     (w_shape[2] // 4), 4)
+    #         w_interleaved = w_interleaved.permute(0, 2, 1, 3)
+    #         w_interleaved = w_interleaved.reshape(
+    #             w_shape[0], w_shape[2] // 4, w_shape[1] * 4)
+    #         return w_interleaved
+
+    #     w31_scales = w13_scale_swapped.to(torch.uint8).view(
+    #         torch.uint8)
+    #     w31_scales_interleaved = _interleave_mxfp4_cutlass_sm90(
+    #         w31_scales)
+
+    #     w2_weight_scale = layer.w2_weight_scale.data
+    #     w2_scales = w2_weight_scale.to(torch.uint8).view(torch.uint8)
+    #     w2_scales_interleaved = _interleave_mxfp4_cutlass_sm90(
+    #         w2_scales)
+
+    #     layer.w13_weight = torch.nn.Parameter(torch.cat([w3_w, w1_w],
+    #                                                     dim=1),
+    #                                             requires_grad=False)
+    #     layer.w13_bias = torch.nn.Parameter(w13_bias_swapped,
+    #                                         requires_grad=False)
+    #     layer.w13_weight_scale = torch.nn.Parameter(
+    #         w31_scales_interleaved, requires_grad=False)
+    #     layer.w2_weight_scale = torch.nn.Parameter(
+    #         w2_scales_interleaved, requires_grad=False)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool = False,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+
+        if enable_eplb:
+            raise NotImplementedError("EPLB is not supported for mxfp4")
+
+        topk_weights, topk_ids = FusedMoE.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias,
+        )
+
+        og_hidden_size = x.size(1)
+        if og_hidden_size < self.hidden_size:
+            pad_size = self.hidden_size - og_hidden_size
+            x = F.pad(x, (0, pad_size), "constant", 0.0)
+
+        return fused_marlin_moe(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            layer.w13_bias,
+            layer.w2_bias,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+            router_logits,
+            topk_weights,
+            topk_ids,
+            global_scale1=None,
+            global_scale2=None,
+            quant_type_id=scalar_types.float4_e2m1f.id,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            global_num_experts=global_num_experts,
+            activation=activation,
+            expert_map=expert_map)[..., :og_hidden_size].contiguous()
+
+        assert x.dtype == torch.bfloat16
+
+        # quant_scales = [
+        #     layer.w13_weight_scale,
+        #     layer.w2_weight_scale,
+        # ]
+
+        # fi_input = x
+        # extra_kwargs = dict(
+        #     use_w4_group_scaling=True,
+        #     fc1_expert_weights=layer.w13_weight,
+        #     fc2_expert_weights=layer.w2_weight,
+        # )
+
+        # output = torch.empty(x.size(0), self.hidden_size, dtype=torch.bfloat16, device=x.device)
+
+        # _ = flashinfer_cutlass_fused_moe(
+        #     input=fi_input,
+        #     token_selected_experts=topk_ids.to(torch.int).contiguous(),
+        #     token_final_scales=topk_weights,
+        #     output_dtype=torch.bfloat16,
+        #     output=output,
+        #     quant_scales=quant_scales,
+        #     fc1_expert_biases=layer.w13_bias,
+        #     fc2_expert_biases=layer.w2_bias,
+        #     swiglu_alpha=layer.gemm1_alpha,
+        #     swiglu_beta=layer.gemm1_beta,
+        #     swiglu_limit=layer.gemm1_clamp_limit,
+        #     tp_size=self.moe.tp_size,
+        #     tp_rank=self.moe.tp_rank,
+        #     tune_max_num_tokens=self.max_capture_size,
+        #     **extra_kwargs,
+        # )
+
+        print(output)
+
+        return output[:, :x.size(1)]
+
+
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
     """MoE method without quantization."""
 
@@ -121,6 +635,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
                        params_dtype: torch.dtype,
                        has_bias: bool = False,
                        **extra_weight_attrs):
+        params_dtype = torch.bfloat16 if params_dtype == "bfloat16" else params_dtype
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(torch.empty(
             num_experts,
@@ -240,6 +755,7 @@ class FusedMoE(torch.nn.Module):
         activation: str = "silu",
         num_redundant_experts: int = 0,
         has_bias=False,
+        max_num_tokens: int = 256,
     ):
         super().__init__()
         if params_dtype is None:
@@ -263,6 +779,7 @@ class FusedMoE(torch.nn.Module):
 
         self.top_k = top_k
 
+        self.intermediate_size = intermediate_size
         assert intermediate_size % self.tp_size == 0
         self.hidden_size = hidden_size
         self.intermediate_size_per_partition = intermediate_size // self.tp_size
@@ -294,13 +811,17 @@ class FusedMoE(torch.nn.Module):
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=params_dtype,
             quant_dtype=quant_dtype,
-            max_num_tokens=256,
+            max_num_tokens=max_num_tokens,
         )
         self.moe_config = moe
 
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
-        quant_method = UnquantizedFusedMoEMethod(moe)
+        if params_dtype == "mxfp4":
+            quant_method = Mxfp4MoEMethod(moe)
+        else:
+            quant_method = UnquantizedFusedMoEMethod(moe)
+
         self.quant_method = quant_method
 
         moe_quant_params = {
@@ -479,11 +1000,12 @@ class FusedMoE(torch.nn.Module):
         if shard_id == "all":
             # (FIXME) for gpt-oss all experts are combined
             if "bias" in weight_name:
-                param.data.copy_(loaded_weight)
+                dim1 = loaded_weight.shape[1]
+                param.data[:, :dim1].copy_(loaded_weight)
             else:
-                param_shape = param.data.shape
-                loaded_weight = loaded_weight.reshape(*param_shape[:-1], -1)
-                param.data.copy_(loaded_weight)
+                dim1 = loaded_weight.shape[1]
+                dim2 = loaded_weight.shape[2]
+                param.data[:, :dim1, :dim2].copy_(loaded_weight)
             return True if return_success else None
 
         expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)

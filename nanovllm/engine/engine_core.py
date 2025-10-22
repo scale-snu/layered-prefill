@@ -73,6 +73,9 @@ class EngineCore:
             engine.busy_loop()
         except Exception as e:
             logger.error(f"Engine core exception: {e}")
+            # print stack trace
+            import traceback
+            traceback.print_exc()
         finally:
             if engine is not None:
                 engine.exit()

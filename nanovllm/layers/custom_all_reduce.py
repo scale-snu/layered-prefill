@@ -340,6 +340,7 @@ def _get_ar_communicator():
         _ar_comm = CustomAllreduce()
     return _ar_comm
 
+@torch.compiler.disable(recursive=True)
 def tensor_model_parallel_all_reduce(tensor: torch.Tensor) -> torch.Tensor:
     """Tensor Parallel all-reduce using direct NCCL calls for CUDA graph compatibility.
 
