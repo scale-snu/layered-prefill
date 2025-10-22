@@ -20,13 +20,13 @@ class RMSNorm(nn.Module):
         self,
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
+        out: None | torch.Tensor = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        shape = x.shape
-        x = x.reshape(-1, self.hidden_size)
-        out = torch.empty_like(x)
+        if out is None:
+            out = torch.empty_like(x)
         if residual is None:
             ops.rms_norm(out, x, self.weight.data, self.eps)
-            return out.reshape(shape)
+            return out
         else:
             ops.add_rms_norm(out, residual, x, self.weight.data, self.eps)
-            return out.reshape(shape), residual
+            return out, residual
