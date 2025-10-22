@@ -168,75 +168,43 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        bs = hidden_states.size(0)
-        if self.is_graph_captured and bs <= max(self.graph_bs):
-            pre_graph = self.pre_graphs[next(x for x in self.graph_bs if x >= bs)]
-            post_graph = self.post_graphs[next(x for x in self.graph_bs if x >= bs)]
-            graph_vars = self.graph_vars
-
-            for k, v in graph_vars.items():
-                if k.startswith("outputs_"):
-                    v.zero_()
-
-            graph_vars["hidden_states"][:bs] = hidden_states
-            if residual is not None:
-                graph_vars["residual"][:bs] = residual
-            graph_vars["positions"][:bs] = positions
-
-            pre_graph.replay()
-
-            q = graph_vars["outputs_q"][:bs]
-            k = graph_vars["outputs_k"][:bs]
-            v = graph_vars["outputs_v"][:bs]
-
-            attn_o = self.self_attn.attn(q, k, v)
-
-            graph_vars["attn_o"][:bs] = attn_o
-            graph_vars["residual"][:bs] = graph_vars["outputs_residual"][:bs]
-
-            for k, v in graph_vars.items():
-                if k.startswith("outputs_"):
-                    v.zero_()
-
-            post_graph.replay()
-
-            hidden_states = graph_vars["outputs_hidden_states"][:bs].clone()
-            residual = graph_vars["outputs_residual"][:bs].clone()
-
-            return hidden_states, residual
-        else:
-            if residual is None:
-                residual = hidden_states
-                hidden_states = self.input_layernorm(hidden_states)
-            else:
-                hidden_states, residual = self.input_layernorm(hidden_states, residual)
-
-            hidden_states = self.self_attn(positions, hidden_states)
-
-            hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-
-            hidden_states = self.mlp(hidden_states)
-            return hidden_states, residual
-
-    def _pre_forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, residual: torch.Tensor | None, slot_mapping: torch.Tensor | None):
         if residual is None:
-            residual = hidden_states
+            residual = hidden_states.clone()
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        qkv = self.self_attn.qkv_proj(hidden_states)
+        hidden_states = self.self_attn(positions, hidden_states)
+
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+
+        hidden_states = self.mlp(hidden_states)
+        return hidden_states, residual
+
+    def _pre_forward(
+            self,
+            positions: torch.Tensor, hidden_states: torch.Tensor, residual: torch.Tensor | None,
+            slot_mapping: torch.Tensor | None,
+            outputs_qkv: torch.Tensor | None = None,
+            ):
+        if residual is None:
+            residual = hidden_states.clone()
+            self.input_layernorm(hidden_states, out=hidden_states)
+        else:
+            self.input_layernorm(hidden_states, residual, out=hidden_states)
+
+        qkv = self.self_attn.qkv_proj(hidden_states, out=outputs_qkv)
         q, k, v = qkv.split([self.self_attn.q_size, self.self_attn.kv_size, self.self_attn.kv_size], dim=-1)
 
         q_by_head = q.view(-1, self.self_attn.num_heads, self.self_attn.head_dim)
-        q_by_head = self.self_attn.q_norm(q_by_head)
+        self.self_attn.q_norm(q_by_head, out=q_by_head)
         q = q_by_head.view(q.shape)
 
         k_by_head = k.view(-1, self.self_attn.num_kv_heads, self.self_attn.head_dim)
-        k_by_head = self.self_attn.k_norm(k_by_head)
+        self.self_attn.k_norm(k_by_head, out=k_by_head)
         k = k_by_head.view(k.shape)
 
-        q, k = self.self_attn.rotary_emb(positions, q, k)
+        self.self_attn.rotary_emb(positions, q, k)
 
         q = q.view(-1, self.self_attn.attn.num_heads, self.self_attn.attn.head_dim)
         k = k.view(-1, self.self_attn.attn.num_kv_heads, self.self_attn.attn.head_dim)
@@ -321,11 +289,14 @@ class Qwen3Model(nn.Module):
                         graph_idx = (layer_idx, next(x for x in self.graph_bs if x >= bs))
                         if layer_idx == 0:
                             pre_graph = self.pre_graphs[graph_idx]
-
                             pre_graph.replay()
-                        q = self.graph_vars["outputs_q"][:bs]
-                        k = self.graph_vars["outputs_k"][:bs]
-                        v = self.graph_vars["outputs_v"][:bs]
+
+                        qkv = self.graph_vars["outputs_qkv"][:bs]
+                        q, k, v = qkv.split([self.layers[0].self_attn.q_size, self.layers[0].self_attn.kv_size, self.layers[0].self_attn.kv_size], dim=-1)
+
+                        q = q.view(-1, self.layers[0].self_attn.num_heads, self.layers[0].self_attn.head_dim)
+                        k = k.view(-1, self.layers[0].self_attn.num_kv_heads, self.layers[0].self_attn.head_dim)
+                        v = v.view(-1, self.layers[0].self_attn.num_kv_heads, self.layers[0].self_attn.head_dim)
 
                         self.layers[layer_idx].self_attn.attn.forward_attention(
                             self.graph_vars["attn_o"][:bs],
@@ -391,11 +362,14 @@ class Qwen3Model(nn.Module):
                     graph_idx = (layer_idx, next(x for x in self.graph_bs if x >= bs))
                     if layer_idx == min(context.prefill_compute_layers):
                         pre_graph = self.pre_graphs[graph_idx]
-
                         pre_graph.replay()
-                    q = self.graph_vars["outputs_q"][:bs]
-                    k = self.graph_vars["outputs_k"][:bs]
-                    v = self.graph_vars["outputs_v"][:bs]
+
+                    qkv = self.graph_vars["outputs_qkv"][:bs]
+                    q, k, v = qkv.split([self.layers[0].self_attn.q_size, self.layers[0].self_attn.kv_size, self.layers[0].self_attn.kv_size], dim=-1)
+
+                    q = q.view(-1, self.layers[0].self_attn.num_heads, self.layers[0].self_attn.head_dim)
+                    k = k.view(-1, self.layers[0].self_attn.num_kv_heads, self.layers[0].self_attn.head_dim)
+                    v = v.view(-1, self.layers[0].self_attn.num_kv_heads, self.layers[0].self_attn.head_dim)
 
                     self.layers[layer_idx].self_attn.attn.forward_attention(
                         self.graph_vars["attn_o"][:bs],
@@ -444,11 +418,14 @@ class Qwen3Model(nn.Module):
                         graph_idx = (layer_idx, next(x for x in self.graph_bs if x >= bs))
                         if layer_idx == min(post_layers):
                             pre_graph = self.pre_graphs[graph_idx]
-
                             pre_graph.replay()
-                        q = self.graph_vars["outputs_q"][:bs]
-                        k = self.graph_vars["outputs_k"][:bs]
-                        v = self.graph_vars["outputs_v"][:bs]
+
+                        qkv = self.graph_vars["outputs_qkv"][:bs]
+                        q, k, v = qkv.split([self.layers[0].self_attn.q_size, self.layers[0].self_attn.kv_size, self.layers[0].self_attn.kv_size], dim=-1)
+
+                        q = q.view(-1, self.layers[0].self_attn.num_heads, self.layers[0].self_attn.head_dim)
+                        k = k.view(-1, self.layers[0].self_attn.num_kv_heads, self.layers[0].self_attn.head_dim)
+                        v = v.view(-1, self.layers[0].self_attn.num_kv_heads, self.layers[0].self_attn.head_dim)
 
                         self.layers[layer_idx].self_attn.attn.forward_attention(
                             self.graph_vars["attn_o"][:bs],
@@ -525,11 +502,14 @@ class Qwen3Model(nn.Module):
                     graph_idx = (layer_idx, next(x for x in self.graph_bs if x >= bs))
                     if layer_idx == 0:
                         pre_graph = self.pre_graphs[graph_idx]
-
                         pre_graph.replay()
-                    q = self.graph_vars["outputs_q"][:bs]
-                    k = self.graph_vars["outputs_k"][:bs]
-                    v = self.graph_vars["outputs_v"][:bs]
+
+                    qkv = self.graph_vars["outputs_qkv"][:bs]
+                    q, k, v = qkv.split([self.layers[0].self_attn.q_size, self.layers[0].self_attn.kv_size, self.layers[0].self_attn.kv_size], dim=-1)
+
+                    q = q.view(-1, self.layers[0].self_attn.num_heads, self.layers[0].self_attn.head_dim)
+                    k = k.view(-1, self.layers[0].self_attn.num_kv_heads, self.layers[0].self_attn.head_dim)
+                    v = v.view(-1, self.layers[0].self_attn.num_kv_heads, self.layers[0].self_attn.head_dim)
 
                     self.layers[layer_idx].self_attn.attn.forward_attention(
                         self.graph_vars["attn_o"][:bs],
@@ -564,9 +544,11 @@ class Qwen3Model(nn.Module):
         residual = torch.zeros(max_num_batched_tokens, hidden_size)
         positions = torch.zeros(max_num_batched_tokens, dtype=torch.int64)
         attn_o = torch.zeros(max_num_batched_tokens, self.layers[0].self_attn.total_num_heads // dist.get_world_size(), self.layers[0].self_attn.head_dim)
-        outputs_q = torch.zeros(max_num_batched_tokens, self.layers[0].self_attn.attn.num_heads, self.layers[0].self_attn.head_dim)
-        outputs_k = torch.zeros(max_num_batched_tokens, self.layers[0].self_attn.attn.num_kv_heads, self.layers[0].self_attn.head_dim)
-        outputs_v = torch.zeros(max_num_batched_tokens, self.layers[0].self_attn.attn.num_kv_heads, self.layers[0].self_attn.head_dim)
+        outputs_qkv = torch.zeros(
+            max_num_batched_tokens,
+            self.layers[0].self_attn.q_size + 2 * self.layers[0].self_attn.kv_size,
+        )
+
         slot_mapping = torch.zeros(max_num_batched_tokens, dtype=torch.int32)
 
         self.graph_vars = dict(
@@ -574,10 +556,8 @@ class Qwen3Model(nn.Module):
             residual=residual,
             positions=positions,
             attn_o=attn_o,
-            outputs_q=outputs_q,
-            outputs_k=outputs_k,
-            outputs_v=outputs_v,
             slot_mapping=slot_mapping,
+            outputs_qkv=outputs_qkv,
         )
 
         self.graph_bs = list(range(1, 8, 1)) + list(range(8, 16, 2)) + list(range(16, 32, 4)) + list(range(32, 128, 8))
@@ -600,17 +580,7 @@ class Qwen3Model(nn.Module):
                 if layer_idx == 0 or schedule_mode == "layered-prefill":
                     pre_graph = torch.cuda.CUDAGraph()
 
-                    _positions = positions[:bs]
-                    _hidden_states = hidden_states[:bs]
-                    if layer_idx == 0:
-                        _residual = None
-                    else:
-                        _residual = residual[:bs]
-                    _slot_mapping = slot_mapping[:bs]
-
-                    _ = self.layers[layer_idx]._pre_forward(_positions, _hidden_states, _residual, _slot_mapping)
-
-                    with torch.cuda.graph(pre_graph, self.pre_graph_pool), capture():
+                    def func(positions, hidden_states, residual, slot_mapping, outputs_qkv, bs):
                         _positions = positions[:bs]
                         _hidden_states = hidden_states[:bs]
                         if layer_idx == 0:
@@ -618,13 +588,17 @@ class Qwen3Model(nn.Module):
                         else:
                             _residual = residual[:bs]
                         _slot_mapping = slot_mapping[:bs]
+                        _outputs_qkv = outputs_qkv[:bs]
 
-                        _residual, _q, _k, _v = self.layers[layer_idx]._pre_forward(_positions, _hidden_states, _residual, _slot_mapping)
+                        _residual, *_ = self.layers[layer_idx]._pre_forward(_positions, _hidden_states, _residual, _slot_mapping, outputs_qkv=_outputs_qkv)
 
-                        outputs_q[:bs] = _q
-                        outputs_k[:bs] = _k
-                        outputs_v[:bs] = _v
-                        residual[:bs] = _residual
+                        if layer_idx == 0:
+                            residual[:bs] = _residual
+
+                    func(positions, hidden_states, residual, slot_mapping, outputs_qkv, bs)
+
+                    with torch.cuda.graph(pre_graph, self.pre_graph_pool), capture():
+                        func(positions, hidden_states, residual, slot_mapping, outputs_qkv, bs)
 
                     if self.pre_graph_pool is None:
                         self.pre_graph_pool = pre_graph.pool()
@@ -633,19 +607,18 @@ class Qwen3Model(nn.Module):
                 if layer_idx == len(self.layers) - 1 or schedule_mode == "layered-prefill":
                     post_graph = torch.cuda.CUDAGraph()
 
-                    _attn_o = attn_o[:bs]
-                    _residual = residual[:bs]
-
-                    _ = self.layers[layer_idx]._post_forward(_attn_o, _residual)
-
-                    with torch.cuda.graph(post_graph, self.post_graph_pool), capture():
+                    def func(attn_o, hidden_states, residual, bs):
                         _attn_o = attn_o[:bs]
                         _residual = residual[:bs]
 
                         _hidden_states, _residual = self.layers[layer_idx]._post_forward(_attn_o, _residual)
-
                         hidden_states[:bs] = _hidden_states
                         residual[:bs] = _residual
+
+                    func(attn_o, hidden_states, residual, bs)
+
+                    with torch.cuda.graph(post_graph, self.post_graph_pool), capture():
+                        func(attn_o, hidden_states, residual, bs)
 
                     if self.post_graph_pool is None:
                         self.post_graph_pool = post_graph.pool()
@@ -654,29 +627,21 @@ class Qwen3Model(nn.Module):
                 if layer_idx < len(self.layers) - 1:
                     con_graph = torch.cuda.CUDAGraph()
 
-                    _positions = positions[:bs]
-                    _hidden_states = hidden_states[:bs]
-                    _residual = residual[:bs]
-                    _attn_o = attn_o[:bs]
-                    _slot_mapping = slot_mapping[:bs]
-
-                    _hidden_states, _residual = self.layers[layer_idx]._post_forward(_attn_o, _residual)
-                    _residual, _q, _k, _v = self.layers[layer_idx + 1]._pre_forward(_positions, _hidden_states, _residual, _slot_mapping)
-
-                    with torch.cuda.graph(con_graph, self.con_graph_pool), capture():
+                    def func(positions, hidden_states, residual, attn_o, slot_mapping, outputs_qkv, bs):
                         _positions = positions[:bs]
                         _hidden_states = hidden_states[:bs]
                         _residual = residual[:bs]
                         _attn_o = attn_o[:bs]
                         _slot_mapping = slot_mapping[:bs]
+                        _outputs_qkv = outputs_qkv[:bs]
 
                         _hidden_states, _residual = self.layers[layer_idx]._post_forward(_attn_o, _residual)
-                        _residual, _q, _k, _v = self.layers[layer_idx + 1]._pre_forward(_positions, _hidden_states, _residual, _slot_mapping)
+                        _residual, *_ = self.layers[layer_idx + 1]._pre_forward(_positions, _hidden_states, _residual, _slot_mapping, outputs_qkv=_outputs_qkv)
 
-                        residual[:bs] = _residual
-                        outputs_q[:bs] = _q
-                        outputs_k[:bs] = _k
-                        outputs_v[:bs] = _v
+                    func(positions, hidden_states, residual, attn_o, slot_mapping, outputs_qkv, bs)
+
+                    with torch.cuda.graph(con_graph, self.con_graph_pool), capture():
+                        func(positions, hidden_states, residual, attn_o, slot_mapping, outputs_qkv, bs)
 
                     if self.con_graph_pool is None:
                         self.con_graph_pool = con_graph.pool()
