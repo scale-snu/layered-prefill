@@ -180,10 +180,12 @@ class ModelRunner:
         if not seqs:
             return None
 
-        max_len = max(len(seq.block_table) for seq in seqs) if seqs else 0
+        max_len = max(len(seq.block_table) for seq in seqs)
 
-        block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
-        block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        block_tables = -torch.ones((len(seqs), max_len), dtype=torch.int32, pin_memory=True)
+        for i, seq in enumerate(seqs):
+            block_tables[i, :len(seq.block_table)] = torch.tensor(seq.block_table, dtype=torch.int32)
+        block_tables = block_tables.cuda(non_blocking=True)
         return block_tables
 
     @nvtx.annotate("ModelRunner::prepare")
@@ -224,15 +226,21 @@ class ModelRunner:
                     continue
 
                 seq_slot_mapping = []
-                for i in range(seq.num_blocks):
+                start_idx = seq.num_processed_tokens
+                end_idx = seq.num_processed_tokens + seq.num_tokens_to_process
+                for i in range(start_idx // seq.block_size, (end_idx - 1) // seq.block_size + 1):
                     start = seq.block_table[i] * self.block_size
                     if i != seq.num_blocks - 1:
-                        end = start + self.block_size
+                        end = (seq.block_table[i] + 1) * self.block_size
                     else:
                         end = start + seq.last_block_num_tokens
+                    if i * self.block_size < start_idx:
+                        start += start_idx - i * self.block_size
+                    if (i + 1) * self.block_size > end_idx:
+                        end = min(end, end_idx - i * self.block_size + start)
                     seq_slot_mapping.append(np.arange(start, end))
                 seq_slot_mapping = np.concatenate(seq_slot_mapping)
-                slot_mapping.extend(seq_slot_mapping[seq.num_processed_tokens:seq.num_processed_tokens + seq.num_tokens_to_process])
+                slot_mapping.extend(seq_slot_mapping)
 
                 if seq.stage != -1:
                     if prefill_compute_layers is not None:
@@ -272,6 +280,7 @@ class ModelRunner:
         decode_block_tables = self.prepare_block_tables(decode_seqs)
         max_seqlen_k_dec = max(context_lens) if context_lens else 0
 
+        len_prefill = int(cu_seqlens_q[-1]) if is_prefill else 0
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
@@ -290,7 +299,7 @@ class ModelRunner:
 
         set_context(
             is_prefill,
-            int(cu_seqlens_q[-1]) if is_prefill else 0,
+            len_prefill,
             cu_seqlens_q,
             cu_seqlens_k,
             max_seqlen_q,
