@@ -690,8 +690,8 @@ class GptOssModel(nn.Module):
             outputs_qkv=outputs_qkv,
         )
 
-        self.graph_bs = list(range(1, 8, 1)) + list(range(8, 16, 2)) + list(range(16, 32, 4)) + list(range(32, 128, 8))
-        bs = 128
+        self.graph_bs = list(range(1, 8, 1)) + list(range(8, 16, 2)) + list(range(16, 32, 4)) + list(range(32, 128, 8)) + list(range(128, 512, 64))
+        bs = 512
         # self.graph_bs = []
         # bs = 1
         while bs <= min(max_num_batched_tokens, 1024):
