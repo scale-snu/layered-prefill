@@ -64,6 +64,7 @@ class Attention(nn.Module):
 
         return self.forward_attention(o, q, k, v, sinks)
 
+    @torch.compile(dynamic=True)
     def forward_attention(self, o: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, sinks: None | torch.Tensor = None) -> torch.Tensor:
         context = get_context()
 
