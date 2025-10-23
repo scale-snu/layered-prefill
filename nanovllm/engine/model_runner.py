@@ -180,13 +180,19 @@ class ModelRunner:
         if not seqs:
             return None
 
-        max_len = max(len(seq.block_table) for seq in seqs)
+        max_len = max(len(s.block_table) for s in seqs)
+        n = len(seqs)
 
-        block_tables = -torch.ones((len(seqs), max_len), dtype=torch.int32, pin_memory=True)
+        block_tables = torch.full(
+            (n, max_len), -1, dtype=torch.int32, pin_memory=True
+        )
+
+        arr = block_tables.numpy()  # zero-copy view
         for i, seq in enumerate(seqs):
-            block_tables[i, :len(seq.block_table)] = torch.tensor(seq.block_table, dtype=torch.int32)
-        block_tables = block_tables.cuda(non_blocking=True)
-        return block_tables
+            block_table = seq.block_table
+            arr[i, :len(block_table)] = block_table
+
+        return block_tables.cuda(non_blocking=True)
 
     @nvtx.annotate("ModelRunner::prepare")
     def prepare(self, seqs: list[Sequence]):
