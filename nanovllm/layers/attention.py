@@ -94,7 +94,6 @@ class Attention(nn.Module):
             )
 
         if context.decode_block_tables is not None:
-            print("len_decode:", context.decode_block_tables.size(0), context.max_seqlen_k)
             flash_attn_varlen_func(
                 q[context.len_prefill:], k_cache, v_cache,
                 out=o[context.len_prefill:],
