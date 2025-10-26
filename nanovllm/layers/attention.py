@@ -90,16 +90,17 @@ class Attention(nn.Module):
                 window_size=(self.window_size, -1),
                 fa_version=self.fa_version,
                 s_aux=sinks,
-                num_splits=32,
+                num_splits=32 if self.fa_version == 3 else 1,
             )
 
         if context.decode_block_tables is not None:
+            print("len_decode:", context.decode_block_tables.size(0), context.max_seqlen_k)
             flash_attn_varlen_func(
                 q[context.len_prefill:], k_cache, v_cache,
                 out=o[context.len_prefill:],
                 max_seqlen_q=1,
                 cu_seqlens_q=self.cu_seqlens_q_cache[:context.decode_block_tables.size(0) + 1],
-                max_seqlen_k=context.max_seqlen_k,
+                max_seqlen_k=context.max_seqlen_k_dec,
                 seqused_k=context.context_lens,
                 softmax_scale=self.scale,
                 causal=True,
@@ -107,7 +108,7 @@ class Attention(nn.Module):
                 window_size=(self.window_size, -1),
                 fa_version=self.fa_version,
                 s_aux=sinks,
-                num_splits=32,
+                num_splits=32 if self.fa_version == 3 else 1,
             )
 
         o = o.view(-1, self.num_heads * self.head_dim)
