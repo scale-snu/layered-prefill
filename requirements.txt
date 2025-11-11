@@ -9,7 +9,6 @@ pandas
 datasets
 pillow
 psutil
-amd-quark
 pynvml
 seaborn
 duckdb

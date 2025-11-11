@@ -90,7 +90,7 @@ class ColumnParallelLinear(LinearBase):
     def forward(self, x: torch.Tensor, out: None | torch.Tensor = None) -> torch.Tensor:
         if out is not None:
             if self.bias is not None:
-                torch.addmm(self.bias, out, self.weight.t(), out=out)
+                torch.addmm(self.bias, x, self.weight.t(), out=out)
             else:
                 torch.matmul(x, self.weight.t(), out=out)
             return out
