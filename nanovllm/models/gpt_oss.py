@@ -185,50 +185,21 @@ class GptOssDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        bs = hidden_states.size(0)
-        if self.is_graph_captured and bs <= max(self.graph_bs):
-            # if cuda graph captured
-            pre_graph = self.pre_graphs[next(x for x in self.graph_bs if x >= bs)]
-            post_graph = self.post_graphs[next(x for x in self.graph_bs if x >= bs)]
-            graph_vars = self.graph_vars
-
-            graph_vars["hidden_states"][:bs] = hidden_states
-            if residual is not None:
-                graph_vars["residual"][:bs] = residual
-            graph_vars["positions"][:bs] = position_ids
-
-            pre_graph.replay()
-
-            q = graph_vars["outputs_q"][:bs]
-            k = graph_vars["outputs_k"][:bs]
-            v = graph_vars["outputs_v"][:bs]
-
-            attn_o = self.self_attn.attn(q, k, v, self.self_attn.sinks.data)
-
-            graph_vars["attn_o"][:bs] = attn_o
-
-            post_graph.replay()
-
-            hidden_states = graph_vars["hidden_states"][:bs]
-            residual = graph_vars["residual"][:bs]
-
-            return hidden_states, residual
+        if residual is None:
+            residual = hidden_states.clone()
+            hidden_states = self.input_layernorm(hidden_states)
         else:
-            if residual is None:
-                residual = hidden_states.clone()
-                hidden_states = self.input_layernorm(hidden_states)
-            else:
-                hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-            hidden_states = self.self_attn(
-                hidden_states=hidden_states,
-                position_ids=position_ids,
-            )
+        hidden_states = self.self_attn(
+            hidden_states=hidden_states,
+            position_ids=position_ids,
+        )
 
-            hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
-            hidden_states = self.mlp(hidden_states)
-            return hidden_states, residual
+        hidden_states = self.mlp(hidden_states)
+        return hidden_states, residual
 
     def _pre_forward(
             self,
@@ -269,87 +240,6 @@ class GptOssDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
 
         return hidden_states, residual
-
-    def capture_cudagraph(self, layer_idx: int = 0, max_num_batched_tokens: int = 1024, graph_vars: dict = None):
-        self.is_graph_captured = True
-
-        self.graph_vars = graph_vars
-        hidden_states = graph_vars["hidden_states"]
-        residual = graph_vars["residual"]
-        positions = graph_vars["positions"]
-        attn_o = graph_vars["attn_o"]
-        outputs_q = graph_vars["outputs_q"]
-        outputs_k = graph_vars["outputs_k"]
-        outputs_v = graph_vars["outputs_v"]
-        slot_mapping = graph_vars["slot_mapping"]
-
-        self.graph_bs = list(range(1, 8, 1)) + list(range(8, 32, 4)) + list(range(32, 128, 8))
-        bs = 128
-        while bs <= min(max_num_batched_tokens, 1024):
-            self.graph_bs.append(bs)
-            bs = bs * 2
-        self.pre_graphs = {}
-        self.post_graphs = {}
-        self.pre_graph_pool = None
-        self.post_graph_pool = None
-
-        for bs in reversed(self.graph_bs):
-            pre_graph = torch.cuda.CUDAGraph()
-
-            _positions = positions[:bs]
-            _hidden_states = hidden_states[:bs]
-            if layer_idx == 0:
-                _residual = None
-            else:
-                _residual = residual[:bs]
-            _slot_mapping = slot_mapping[:bs]
-
-            _ = self._pre_forward(_positions, _hidden_states, _residual, _slot_mapping)
-
-            with torch.cuda.graph(pre_graph, self.pre_graph_pool), capture():
-                _positions = positions[:bs]
-                _hidden_states = hidden_states[:bs]
-                if layer_idx == 0:
-                    _residual = None
-                else:
-                    _residual = residual[:bs]
-                _slot_mapping = slot_mapping[:bs]
-
-                _residual, _q, _k, _v = self._pre_forward(_positions, _hidden_states, _residual, _slot_mapping)
-
-                outputs_q[:bs] = _q
-                outputs_k[:bs] = _k
-                outputs_v[:bs] = _v
-                residual[:bs] = _residual
-
-            post_graph = torch.cuda.CUDAGraph()
-
-            _positions = positions[:bs]
-            _attn_o = attn_o[:bs]
-            _residual = residual[:bs]
-
-            _ = self._post_forward(_attn_o, _residual)
-
-            with torch.cuda.graph(post_graph, self.post_graph_pool), capture():
-                _attn_o = attn_o[:bs]
-                _residual = residual[:bs]
-
-                _hidden_states, _residual = self._post_forward(_attn_o, _residual)
-
-                hidden_states[:bs] = _hidden_states
-                residual[:bs] = _residual
-
-            if self.pre_graph_pool is None:
-                self.pre_graph_pool = pre_graph.pool()
-            if self.post_graph_pool is None:
-                self.post_graph_pool = post_graph.pool()
-
-            self.pre_graphs[bs] = pre_graph
-            self.post_graphs[bs] = post_graph
-
-            torch.cuda.synchronize()
-
-        print(f"Captured {len(self.pre_graphs) + len(self.post_graphs)} CUDA graphs for layer {layer_idx}.")
 
 
 class GptOssModel(nn.Module):
@@ -431,6 +321,7 @@ class GptOssModel(nn.Module):
                         self.layers[layer_idx].self_attn.attn.forward_attention(
                             self.graph_vars["attn_o"][:bs],
                             q, k, v,
+                            sinks=self.layers[layer_idx].self_attn.sinks.data,
                         )
 
                         if layer_idx < max(pre_layers):
@@ -504,6 +395,7 @@ class GptOssModel(nn.Module):
                     self.layers[layer_idx].self_attn.attn.forward_attention(
                         self.graph_vars["attn_o"][:bs],
                         q, k, v,
+                        sinks=self.layers[layer_idx].self_attn.sinks.data,
                     )
 
                     if layer_idx < max(context.prefill_compute_layers):
@@ -560,6 +452,7 @@ class GptOssModel(nn.Module):
                         self.layers[layer_idx].self_attn.attn.forward_attention(
                             self.graph_vars["attn_o"][:bs],
                             q, k, v,
+                            sinks=self.layers[layer_idx].self_attn.sinks.data,
                         )
 
                         if layer_idx < max(post_layers):
@@ -644,6 +537,7 @@ class GptOssModel(nn.Module):
                     self.layers[layer_idx].self_attn.attn.forward_attention(
                         self.graph_vars["attn_o"][:bs],
                         q, k, v,
+                        sinks=self.layers[layer_idx].self_attn.sinks.data,
                     )
 
                     if layer_idx < len(self.layers) - 1:

@@ -5,6 +5,9 @@ from torch import nn
 from safetensors import safe_open
 import re
 
+import triton
+import triton.language as tl
+
 from nanovllm.layers.fused_moe import FusedMoE
 
 def default_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor):
@@ -51,14 +54,9 @@ proj_to_param_shard = {
 
 def _dequant_mxfp4(x: torch.Tensor, scale: torch.Tensor,
                 float_dtype: torch.dtype) -> torch.Tensor:
-    try:
-        from quark.torch.kernel import mx
-    except ImportError as err:
-        raise ImportError("The package `amd-quark` is required to use "
-                        "MX-FP4 models. Please install it with `pip install "
-                        "amd-quark`.") from err
+    from .mxfp import upcast_from_mxfp_torch
 
-    return mx.dq_mxfp4(x, scale, float_dtype)
+    return upcast_from_mxfp_torch(x, scale, float_dtype, axis=-1)
 
 
 def load_model(model: nn.Module, path: str):
