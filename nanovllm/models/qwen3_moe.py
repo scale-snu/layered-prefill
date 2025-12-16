@@ -87,7 +87,8 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             reduce_results=False,
-            renormalize=config.norm_topk_prob
+            renormalize=config.norm_topk_prob,
+            max_num_tokens=config.max_num_batched_tokens,
         )
 
         self.gate = ReplicatedLinear(

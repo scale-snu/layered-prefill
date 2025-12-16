@@ -1,4 +1,6 @@
 import gc
+import pdb
+import sys
 
 # A context manager to control the state of the garbage collector.
 # When entering the context, it sets the GC state to the specified state (enabled or disabled).
@@ -35,3 +37,18 @@ disable_gc = lambda enable=True: gc_control(enable=not enable)
 
 # enable_gc: A decorator or context manager to enable garbage collection during the execution of a function or a block of code.
 enable_gc = lambda enable=True: gc_control(enable=enable)
+
+
+
+class ForkedPdb(pdb.Pdb):
+    """A Pdb subclass that may be used
+    from a forked multiprocessing child
+
+    """
+    def interaction(self, *args, **kwargs):
+        _stdin = sys.stdin
+        try:
+            sys.stdin = open('/dev/stdin')
+            pdb.Pdb.interaction(self, *args, **kwargs)
+        finally:
+            sys.stdin = _stdin

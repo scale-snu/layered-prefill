@@ -148,7 +148,10 @@ class GptOssMLP(torch.nn.Module):
                                 reduce_results=False,
                                 renormalize=True,
                                 has_bias=True,
-                                activation="swigluoai")
+                                activation="swigluoai",
+                                params_dtype=config.moe_dtype,
+                                max_num_tokens=config.max_num_batched_tokens,
+                                )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         g = self.router(x)
