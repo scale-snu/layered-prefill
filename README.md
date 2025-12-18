@@ -24,6 +24,9 @@ CUDA_VISIBLE_DEVICES=0,1 python nanovllm/entrypoints/api_server.py --model /home
 
 # layered prefill
 CUDA_VISIBLE_DEVICES=0,1 python nanovllm/entrypoints/api_server.py --model /home/gunjunlee/.cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39/ --max-num-batched-tokens 8192 --max-num-seqs 256 --max-model-len 32768 --gpu-memory-utilization 0.9 --tensor-parallel-size 2 --schedule-mode layered-prefill --num-stages 16
+
+# gpt-oss mxfp4 (chunked prefill)
+python nanovllm/entrypoints/api_server.py --model /home/gunjunlee/.cache/huggingface/hub/models--openai--gpt-oss-20b/snapshots/6cee5e81ee83917806bbde320786a8fb61efebee/ --max-num-batched-tokens 512 --max-num-seqs 256 --max-model-len 32768 --gpu-memory-utilization 0.9 --tensor-parallel-size 2 --schedule-mode chunked-prefill --num-stages 1 --moe-dtype mxfp4
 ```
 
 ## Algorithm
