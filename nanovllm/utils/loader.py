@@ -77,9 +77,11 @@ def load_model(model: nn.Module, path: str):
                     param_path = f"model.layers.{layer_idx}.mlp.experts.{param_name}"
                     moe_layer = find_fused_moe_layer(model, layer_idx)
                     assert moe_layer is not None, f"FusedMoE layer not found for layer index {layer_idx}"
-                    param = model.get_parameter(param_path)
                     loaded_weight = f.get_tensor(weight_name)
-                    if moe_layer.params_dtype in [torch.float16, torch.bfloat16]:
+                    if moe_layer.params_dtype in [torch.float16, torch.bfloat16, "float16", "bfloat16"]:
+                        if weight_name.endswith("_scales"):
+                            continue
+                        param = model.get_parameter(param_path)
                         scale = None
                         if proj in ["gate_up_proj_blocks", "down_proj_blocks"]:
                             scale_name = f"model.layers.{layer_idx}.mlp.experts.{proj.replace('_blocks', '_scales')}"
@@ -93,6 +95,7 @@ def load_model(model: nn.Module, path: str):
 
                         moe_layer.weight_loader(param, loaded_weight, weight_name, shard_id, expert_id)
                     else:
+                        param = model.get_parameter(param_path)
                         assert moe_layer.params_dtype == "mxfp4", "Only mxfp4 quantization is supported for MoE layers."
 
                         def cdiv(a, b):

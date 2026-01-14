@@ -635,6 +635,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase):
                        params_dtype: torch.dtype,
                        has_bias: bool = False,
                        **extra_weight_attrs):
+        params_dtype = torch.bfloat16 if params_dtype == "bfloat16" else params_dtype
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(torch.empty(
             num_experts,
