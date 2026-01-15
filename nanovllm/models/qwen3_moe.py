@@ -675,7 +675,7 @@ class Qwen3MoeModel(nn.Module):
         bs = 512
         # self.graph_bs = []
         # bs = 1
-        while bs <= min(max_num_batched_tokens, 1024):
+        while bs <= min(max_num_batched_tokens, 8192):
             self.graph_bs.append(bs)
             bs = bs * 2
         self.graph_bs = [bs for bs in self.graph_bs if bs <= max_num_batched_tokens]

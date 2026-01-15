@@ -81,14 +81,17 @@ class ModelRunner:
                 self.loop()
 
     def exit(self):
+        print(f"ModelRunner rank {self.rank} exiting...")
         if self.world_size > 1:
             self.shm.close()
             dist.barrier()
             if self.rank == 0:
                 self.shm.unlink()
 
-        torch.cuda.synchronize()
-        dist.destroy_process_group()
+        # torch.cuda.synchronize()
+        # dist.destroy_process_group()
+
+        print(f"ModelRunner rank {self.rank} exited.")
 
     def loop(self):
         while True:

@@ -141,3 +141,25 @@ If you use layered prefill for your research, please cite our [paper](https://ar
       url={https://arxiv.org/abs/2510.08055},
 }
 ```
+
+## ETC
+
+vllm disagg benchmark command for Qwen3-30B-A3B with p2p nccl kv transfer and xpyd proxy
+
+```
+CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve Qwen/Qwen3-30B-A3B \
+    --port 8100 \
+    --max-model-len 32768 --tensor-parallel-size 4 \
+    --gpu-memory-utilization 0.6 \
+    --no-enable-prefix-caching --kv-transfer-config \        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":5e9,"kv_port":23423,"kv_connector_extra_config":{"proxy_ip": "localhost", "proxy_port": "30001", "http_port": "8100", "send_type": "PUT_ASYNC", "nccl_num_channels": "16"}}'
+
+CUDA_VISIBLE_DEVICES=4,5,6,7 vllm serve Qwen/Qwen3-30B-A3B \
+    --port 8200 \
+    --max-model-len 32768 --tensor-parallel-size 4 \
+    --gpu-memory-utilization 0.6 \
+    --no-enable-prefix-caching --kv-transfer-config \        '{"kv_connector":"P2pNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2,"kv_buffer_size":5e9,"kv_port":"23433","kv_connector_extra_config":{"proxy_ip": "localhost", "proxy_port": "30001", "http_port": "8200", "send_type": "PUT_ASYNC", "nccl_num_channels": "16"}}'
+
+python examples/online_serving/disaggregated_serving_p2p_nccl_xpyd/disagg_proxy_p2p_nccl_xpyd.py
+
+python benchmarks/benchmark_serving.py --model Qwen/Qwen3-30B-A3B --endpoint /v1/completions --request-rate 4.0 --percentile-metrics 'ttft,tpot,itl,e2el' --metric-percentiles '5,10,50,90,95,99,99.9,100' --goodput 'ttft:200' 'tpot:20' 'e2el:20000' --num-prompts 2400 --dataset-name sharegpt --port 10001 --backend vllm --save-result --save-detailed --result-filename logs/benchmark_models--Qwen--Qwen3-235B-A22B_512_1024_32768_0.9_8_False_debug_disagg_p4d4_1_sharegpt_-1_None_4.0_2400.json > logs/benchmark_models--Qwen--Qwen3-235B-A22B_512_1024_32768_0.9_8_False_debug_disagg_p4d4_1_sharegpt_-1_None_4.0_2400.log 2>&1
+```

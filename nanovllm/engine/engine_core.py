@@ -57,13 +57,14 @@ class EngineCore:
         self.output_thread.start()
 
     def exit(self):
-        pass
-        # self._send_engine_dead()
-        # self.model_runner.call("exit")
-        # del self.model_runner
-        # for p in self.ps:
-        #     p.join()
-        # logger.info("Engine core model runner exit")
+        # pass
+        self._send_engine_dead()
+        logger.info("Engine core model runner exit")
+        self.model_runner.call("exit")
+        for idx, p in enumerate(self.ps):
+            logger.info(f"Engine core model runner {idx} exit")
+            p.join()
+        logger.info("Engine core model runner exit")
 
     @staticmethod
     def run_engine(config: Config, input_address: str, output_address: str):
@@ -84,7 +85,10 @@ class EngineCore:
         logger.info("Send engine core dead signal")
         exit_seq = Sequence([-1], seq_id=-1)
         self.output_queue.put_nowait([exit_seq])
-        self.output_thread.join(timeout=5.0)
+        self.output_thread.join()
+        logger.info("Engine core output thread exit")
+        self.input_thread.join()
+        logger.info("Engine core input thread exit")
 
     def busy_loop(self):
         shutdown = False
@@ -151,7 +155,7 @@ class EngineCore:
                     elif (request_type == EngineCoreRequestType.SHUTDOWN):
                         logger.info("Engine core input thread shutdown")
                         self.input_queue.put_nowait(Sequence([-1], seq_id=-1))
-                        break
+                        return
 
     def process_output_sockets(self, output_address: str):
         """Output socket IO thread."""
@@ -165,6 +169,6 @@ class EngineCore:
                     if seq.seq_id == -1:
                         socket.send(pickle.dumps((EngineCoreRequestType.SHUTDOWN, None), protocol=pickle.HIGHEST_PROTOCOL))
                         logger.info("Engine core output thread closed")
-                        break
+                        return
                 serialized_obj = pickle.dumps((EngineCoreRequestType.ADD, output), protocol=pickle.HIGHEST_PROTOCOL)
                 socket.send(serialized_obj)
