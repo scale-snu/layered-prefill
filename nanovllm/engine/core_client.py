@@ -33,9 +33,12 @@ class CoreClient:
 
         input_address = addresses["input_address"]
         output_address = addresses["output_address"]
-        self.input_socket  = make_zmq_socket(
-            self.ctx, input_address, zmq.ROUTER, bind=True)
-        identity, _ = self.loop.run_until_complete(self.input_socket.recv_multipart())
+        async def make_input_socket():
+            input_socket = make_zmq_socket(
+                self.ctx, input_address, zmq.ROUTER, bind=True)
+            identity, _ = await input_socket.recv_multipart()
+            return input_socket, identity
+        self.input_socket, identity = self.loop.run_until_complete(make_input_socket())
         logger.info(f"Core engine input socket identity: {identity}")
         self.core_engine_identity = identity
         self.output_socket = make_zmq_socket(
@@ -85,7 +88,7 @@ class CoreClient:
                                         name="EngineCoreOutputQueueThread",
                                         daemon=True)
         self.output_queue_thread.start()
-        self._finalizer = weakref.finalize(self, self.close)
+        # self._finalizer = weakref.finalize(self, self.close)
 
     def close(self):
         self._shut_down_core_engine()
@@ -95,7 +98,13 @@ class CoreClient:
             with self.ctx.socket(zmq.PAIR) as shutdown_sender:
                 shutdown_sender.connect(self.shutdown_path)
                 # Send shutdown signal.
-                shutdown_sender.send(b'')
+                try:
+                    asyncio.get_running_loop()
+                    shutdown_sender.send(b'')
+                except RuntimeError:
+                    async def send_shutdown():
+                        shutdown_sender.send(b'')
+                    self.loop.run_until_complete(send_shutdown())
         self.output_queue_thread.join()
         logger.info("Core client output thread is shut down")
 
@@ -105,7 +114,13 @@ class CoreClient:
     def _shut_down_core_engine(self):
         logger.info("Shutdown core engine")
         if self.engine_core_process is not None:
-            self.input_socket.send_multipart([self.core_engine_identity, pickle.dumps((EngineCoreRequestType.SHUTDOWN, None), protocol=pickle.HIGHEST_PROTOCOL)], copy=False)
+            try:
+                asyncio.get_running_loop()
+                self.input_socket.send_multipart([self.core_engine_identity, pickle.dumps((EngineCoreRequestType.SHUTDOWN, None), protocol=pickle.HIGHEST_PROTOCOL)], copy=False)
+            except RuntimeError:
+                async def send_shutdown():
+                    self.input_socket.send_multipart([self.core_engine_identity, pickle.dumps((EngineCoreRequestType.SHUTDOWN, None), protocol=pickle.HIGHEST_PROTOCOL)], copy=False)
+                self.loop.run_until_complete(send_shutdown())
             self.engine_core_process.join()
 
     def get_output(self) -> Sequence:

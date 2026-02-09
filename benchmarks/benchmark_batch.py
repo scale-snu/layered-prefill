@@ -17,7 +17,7 @@ from nanovllm.engine.async_llm_engine import AsyncLLMEngine
 from nanovllm.entrypoints.config import APIServerConfig
 
 CONDA_PREFIX = os.environ.get("CONDA_PREFIX", "")
-GPU_IDS = os.environ.get("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7").split(",")
+GPU_IDS = os.environ.get("CUDA_VISIBLE_DEVICES", "0,1").split(",")
 ENV = r"""TORCH_CUDA_ARCH_LIST="8.0;9.0" PATH=$PATH:{conda_prefix}/nvvm/bin CUDA_HOME={conda_prefix}/targets/x86_64-linux CUDA_VISIBLE_DEVICES={gpu_id}""".format(conda_prefix=CONDA_PREFIX, gpu_id=",".join(GPU_IDS))
 GPU_ID = int(GPU_IDS[0])
 
@@ -78,21 +78,27 @@ def run_command(command):
 if __name__ == "__main__":
     server_configs = {
         "models": [
-            # "/data/cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/9c925d64d72725edaf899c6cb9c377fd0709d9c5/",
-            # "/data/cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B/snapshots/ae659febe817e4b3ebd7355f47792725801204c9/",
-            # "/data/cache/huggingface/hub/models--openai--gpt-oss-20b/snapshots/d666cf3b67006cf8227666739edf25164aaffdeb/",
-
-            # "/home/gunjunlee/.cache/huggingface/hub/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218/",
-            ("qwen", "/home/ubuntu/.cache/huggingface/hub/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39/", "bfloat16"),
-            # ("gpt", "/home/ubuntu/.cache/huggingface/hub/models--openai--gpt-oss-20b/snapshots/6cee5e81ee83917806bbde320786a8fb61efebee/", "bfloat16"),
+            ("qwen", "Qwen/Qwen3-30B-A3B", "bfloat16"),
+            ("gpt", "openai/gpt-oss-20b", "bfloat16"),
             # ("qwen-235b", "/home/ubuntu/.cache/huggingface/hub/models--Qwen--Qwen3-235B-A22B/snapshots/8efa61729e24bd65b1d152b5ab5409052aa80e65/", "bfloat16"),
             # ("gpt-120b-mxfp4", "/home/ubuntu/.cache/huggingface/hub/models--openai--gpt-oss-120b/snapshots/b5c939de8f754692c1647ca79fbf85e8c1e70f8a/", "mxfp4"),
         ],
         "setups": [
+            # {"model_code": "qwen-8b", "max_num_batched_tokens": 8192, "max_num_seqs": 256, "max_model_len": 32768, "gpu_memory_utilization": 0.85, "tensor_parallel_size": 2, "enforce_eager": False, "log_level": "debug", "host": "localhost", "schedule_mode": "layered-prefill", "num_stages": 16},
+            # {"model_code": "qwen-8b", "max_num_batched_tokens": 512, "max_num_seqs": 256, "max_model_len": 32768, "gpu_memory_utilization": 0.85, "tensor_parallel_size": 2, "enforce_eager": False, "log_level": "debug", "host": "localhost", "schedule_mode": "chunked-prefill", "num_stages": 1},
             # {"model_code": "qwen", "max_num_batched_tokens": 8192, "max_num_seqs": 256, "max_model_len": 32768, "gpu_memory_utilization": 0.85, "tensor_parallel_size": 2, "enforce_eager": False, "log_level": "debug", "host": "localhost", "schedule_mode": "layered-prefill", "num_stages": 4},
             # {"model_code": "qwen", "max_num_batched_tokens": 8192, "max_num_seqs": 256, "max_model_len": 32768, "gpu_memory_utilization": 0.85, "tensor_parallel_size": 2, "enforce_eager": False, "log_level": "debug", "host": "localhost", "schedule_mode": "layered-prefill", "num_stages": 8},
-            {"model_code": "qwen", "max_num_batched_tokens": 8192, "max_num_seqs": 256, "max_model_len": 32768, "gpu_memory_utilization": 0.85, "tensor_parallel_size": 8, "enforce_eager": False, "log_level": "debug", "host": "localhost", "schedule_mode": "layered-prefill", "num_stages": 16},
-            {"model_code": "qwen", "max_num_batched_tokens": 512, "max_num_seqs": 256, "max_model_len": 32768, "gpu_memory_utilization": 0.85, "tensor_parallel_size": 8, "enforce_eager": False, "log_level": "debug", "host": "localhost", "schedule_mode": "chunked-prefill", "num_stages": 1},
+            {"model_code": "qwen", "max_num_batched_tokens": 8192, "max_num_seqs": 256, "max_model_len": 32768, "gpu_memory_utilization": 0.85, "tensor_parallel_size": 2, "enforce_eager": False, "log_level": "debug", "host": "localhost", "schedule_mode": "layered-prefill", "num_stages": 16},
+            {"model_code": "qwen", "max_num_batched_tokens": 512, "max_num_seqs": 256, "max_model_len": 32768, "gpu_memory_utilization": 0.85, "tensor_parallel_size": 2, "enforce_eager": False, "log_level": "debug", "host": "localhost", "schedule_mode": "chunked-prefill", "num_stages": 1},
+            {"model_code": "gpt", "max_num_batched_tokens": 8192, "max_num_seqs": 256, "max_model_len": 32768, "gpu_memory_utilization": 0.85, "tensor_parallel_size": 2, "enforce_eager": False, "log_level": "debug", "host": "localhost", "schedule_mode": "layered-prefill", "num_stages": 12},
+            {"model_code": "gpt", "max_num_batched_tokens": 512, "max_num_seqs": 256, "max_model_len": 32768, "gpu_memory_utilization": 0.85, "tensor_parallel_size": 2, "enforce_eager": False, "log_level": "debug", "host": "localhost", "schedule_mode": "chunked-prefill", "num_stages": 1},
+            # {"model_code": "qwen", "max_num_batched_tokens": 8192, "max_num_seqs": 256, "max_model_len": 32768, "gpu_memory_utilization": 0.85, "tensor_parallel_size": 2, "enforce_eager": False, "log_level": "debug", "host": "localhost", "schedule_mode": "layered-prefill", "num_stages": 8},
+            # {"model_code": "qwen", "max_num_batched_tokens": 1024, "max_num_seqs": 256, "max_model_len": 32768, "gpu_memory_utilization": 0.85, "tensor_parallel_size": 2, "enforce_eager": False, "log_level": "debug", "host": "localhost", "schedule_mode": "chunked-prefill", "num_stages": 1},
+            # {"model_code": "qwen", "max_num_batched_tokens": 8192, "max_num_seqs": 256, "max_model_len": 32768, "gpu_memory_utilization": 0.85, "tensor_parallel_size": 2, "enforce_eager": False, "log_level": "debug", "host": "localhost", "schedule_mode": "layered-prefill", "num_stages": 4},
+            # {"model_code": "qwen", "max_num_batched_tokens": 2048, "max_num_seqs": 256, "max_model_len": 32768, "gpu_memory_utilization": 0.85, "tensor_parallel_size": 2, "enforce_eager": False, "log_level": "debug", "host": "localhost", "schedule_mode": "chunked-prefill", "num_stages": 1},
+            # {"model_code": "qwen", "max_num_batched_tokens": 8192, "max_num_seqs": 256, "max_model_len": 32768, "gpu_memory_utilization": 0.85, "tensor_parallel_size": 2, "enforce_eager": False, "log_level": "debug", "host": "localhost", "schedule_mode": "layered-prefill", "num_stages": 2},
+            # {"model_code": "qwen", "max_num_batched_tokens": 4096, "max_num_seqs": 256, "max_model_len": 32768, "gpu_memory_utilization": 0.85, "tensor_parallel_size": 2, "enforce_eager": False, "log_level": "debug", "host": "localhost", "schedule_mode": "chunked-prefill", "num_stages": 1},
+            # {"model_code": "qwen", "max_num_batched_tokens": 8192, "max_num_seqs": 256, "max_model_len": 32768, "gpu_memory_utilization": 0.85, "tensor_parallel_size": 2, "enforce_eager": False, "log_level": "debug", "host": "localhost", "schedule_mode": "chunked-prefill", "num_stages": 1},
             # {"model_code": "qwen-235b", "max_num_batched_tokens": 8192, "max_num_seqs": 1024, "max_model_len": 32768, "gpu_memory_utilization": 0.9, "tensor_parallel_size": 8, "enforce_eager": False, "log_level": "debug", "host": "localhost", "schedule_mode": "layered-prefill", "num_stages": 16},
             # {"model_code": "qwen-235b", "max_num_batched_tokens": 512, "max_num_seqs": 1024, "max_model_len": 32768, "gpu_memory_utilization": 0.9, "tensor_parallel_size": 8, "enforce_eager": False, "log_level": "debug", "host": "localhost", "schedule_mode": "chunked-prefill", "num_stages": 1},
             # {"model_code": "qwen", "max_num_batched_tokens": 1024, "max_num_seqs": 256, "max_model_len": 32768, "gpu_memory_utilization": 0.85, "tensor_parallel_size": 2, "enforce_eager": False, "log_level": "debug", "host": "localhost", "schedule_mode": "chunked-prefill", "num_stages": 1},
@@ -122,18 +128,11 @@ if __name__ == "__main__":
         # ("qwen", "sharegpt", -1, None, [1.0, 1.2, 1.4, 1.6, 1.8, 2.0]),
         # ("gpt", "sharegpt", -1, None, [1.0, 1.5, 2.0, 2.5, 3.0]),
         # H100x2
-        # ("qwen", "arxiv", -1, None, [1.3, 1.4, 1.5, 1.6, 1.7, 1.8]),
-        # ("qwen", "arxiv", -1, None, [1.3]),
-        # ("qwen", "arxiv", -1, None, [1.4, 1.5, 1.6, 1.7, 1.8]),
-        # ("qwen", "arxiv", -1, None, [1.9, 2.0, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8]),
-        # ("qwen", "sharegpt", -1, None, [4.0, 4.2, 4.4, 4.6, 4.8, 5.0]),
-        # ("gpt", "arxiv", -1, None, [2.1, 2.3, 2.5, 2.7, 2.9, 3.1]),
-        # ("gpt", "sharegpt", -1, None, [5.8, 6.0, 6.2, 6.4, 6.6, 6.8]),
-        # ("gpt-120b-mxfp4", "arxiv", -1, None, [0.8, 1.0, 1.2, 1.4, 1.6]),
-        # ("gpt-120b-mxfp4", "sharegpt", -1, None, [2.5, 3.0, 3.5, 4.0, 4.5]),
+        ("qwen", "arxiv", -1, None, [1.3, 1.4, 1.5, 1.6, 1.7, 1.8]),
+        ("qwen", "sharegpt", -1, None, [4.0, 4.2, 4.4, 4.6, 4.8, 5.0]),
+        ("gpt", "arxiv", -1, None, [2.1, 2.3, 2.5, 2.7, 2.9, 3.1]),
+        ("gpt", "sharegpt", -1, None, [5.8, 6.0, 6.2, 6.4, 6.6, 6.8]),
         # H100x8
-        ("qwen", "arxiv", -1, None, [4.0]),
-        # ("qwen", "sharegpt", -1, None, [4.0, 6.0]),
         # ("qwen-235b", "arxiv", -1, None, [1.0, 1.1, 1.2, 1.3, 1.4, 1.5]),
         # ("qwen-235b", "sharegpt", -1, None, [2.5, 3.0, 3.5, 4.0, 4.5]),
         # ("gpt-120b-mxfp4", "arxiv", -1, None, [2.0, 3.0, 4.0, 5.0, 6.0, 7.0]),
@@ -199,7 +198,7 @@ if __name__ == "__main__":
                 num_requests = min(NUM_REQUESTS, int(MAX_TIME / (1 / request_rate)))
                 print(f"Running benchmark with request config: {input_length}, {output_length}, {request_rate}, {num_requests}")
 
-                log_filename = f"logs/benchmark_{model.split('/')[-4]}_{max_num_batched_tokens}_{max_num_seqs}_{max_model_len}_{gpu_memory_utilization}_{tensor_parallel_size}_{enforce_eager}_{log_level}_{schedule_mode}_{num_stages}_{dataset_name}_{input_length}_{output_length}_{request_rate}_{num_requests}.log"
+                log_filename = f"logs/benchmark_{model_code}_{max_num_batched_tokens}_{max_num_seqs}_{max_model_len}_{gpu_memory_utilization}_{tensor_parallel_size}_{enforce_eager}_{log_level}_{schedule_mode}_{num_stages}_{dataset_name}_{input_length}_{output_length}_{request_rate}_{num_requests}.log"
                 json_filename = log_filename.replace(".log", ".json")
 
                 os.makedirs(os.path.dirname(json_filename), exist_ok=True)

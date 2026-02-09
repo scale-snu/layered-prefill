@@ -100,6 +100,10 @@ class RequestTracker:
         )
         self._tokenizer_process.start()
 
+    def close(self) -> None:
+        self._tokenizer_process.input_queue.put_nowait(None)
+        self._tokenizer_process.join()
+
     def add_request(self, request_id: str, prompt: Union[str, List[int]], sampling_params: SamplingParams) -> AsyncStream:
         if request_id in self._streams:
             raise KeyError(f"Request {request_id} already exists.")
@@ -189,6 +193,9 @@ class _AsyncLLMEngine:
             ))
         return ret
 
+    def exit(self) -> None:
+        self.core_client.close()
+
 
 class AsyncLLMEngine:
     def __init__(self, config: Config) -> None:
@@ -197,6 +204,9 @@ class AsyncLLMEngine:
         self._tracker: RequestTracker
         self._loop_task: Optional[asyncio.Task] = None
         self._errored: Optional[Exception] = None
+
+        # if not self._loop_task or self._loop_task.done():
+        #     self.start()
 
     def start(self) -> None:
         if self._loop_task and not self._loop_task.done():
@@ -276,7 +286,14 @@ class AsyncLLMEngine:
             self._tracker.abort_request(request_id)
             # raise
 
-    async def exit(self) -> None:
+    def exit(self) -> None:
         if self._loop_task:
+            logger.info("Cancelling AsyncLLMEngine loop task...")
             self._loop_task.cancel()
+            logger.info("AsyncLLMEngine loop task cancelled.")
+        logger.info("Closing RequestTracker...")
+        self._tracker.close()
+        logger.info("RequestTracker closed.")
+        logger.info("AsyncLLMEngine exiting...")
         self._engine.exit()
+        logger.info("AsyncLLMEngine exited.")

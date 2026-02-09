@@ -1,5 +1,6 @@
 from uuid import uuid4
 import zmq
+import asyncio
 from typing import Any, Union, Optional
 
 from nanovllm.config import Config
