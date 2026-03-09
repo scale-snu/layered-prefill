@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Adapted from https://github.com/vllm-project/vllm
 /*
  * Adapted from
  * https://github.com/pytorch/pytorch/blob/v2.0.1/aten/src/ATen/Dispatch.h

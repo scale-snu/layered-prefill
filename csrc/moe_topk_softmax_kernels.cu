@@ -1,4 +1,5 @@
 /*
+ * Also adapted from https://github.com/microsoft/sarathi-serve
  * Adapted from https://github.com/NVIDIA/TensorRT-LLM/blob/v0.7.1/cpp/tensorrt_llm/kernels/mixtureOfExperts/moe_kernels.cu
  * Copyright (c) 2024, The vLLM team.
  * SPDX-FileCopyrightText: Copyright (c) 1993-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
